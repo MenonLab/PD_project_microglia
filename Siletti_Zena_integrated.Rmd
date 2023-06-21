@@ -1,0 +1,570 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+```
+
+```{r}
+clustered_siletti <- readRDS("clustered_bydataset_Siletti_zena_lognorm_microglia_integrated.rds")
+```
+```{r}
+head(clustered_siletti@meta.data)
+```
+```{r}
+clustered_siletti$new_zena_annotation <- clustered_siletti$zena_cluster_name
+clustered_siletti$new_zena_annotation <- gsub("Zena_0", "M1", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_1", "M2", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_2", "M3", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_3", "M4", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_4", "M5", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_5", "M6", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_6", "M7", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_7", "PVM", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_8", "M8", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_9", "M9", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_10", "M10", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_11", "M11", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_12", "M12", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_13", "M13", clustered_siletti$new_zena_annotation)
+clustered_siletti$new_zena_annotation <- gsub("Zena_14", "Mono", clustered_siletti$new_zena_annotation)
+
+```
+
+
+```{r}
+clustered_siletti$new_region <- clustered_siletti$region
+clustered_siletti$new_region <- gsub("SNCTRL", "SN_NPC", clustered_siletti$new_region)
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+p=DimPlot(clustered_siletti, group.by = "new_region")+NoLegend()
+ggsave(p,file="Siletti_byregion_nolegned.tiff")
+
+#DimPlot(clustered_siletti, group.by = "region",split.by = "region")+NoLegend()
+
+
+Idents(clustered_siletti) <- "new_zena_annotation"
+p=DimPlot(clustered_siletti, cells.highlight = WhichCells(clustered_siletti, idents = "M8"), label = T) +
+  scale_color_manual(labels = c("Unseleted", "M8"), values = c("grey", "Dark red")) +
+  labs(color = "legend title")+NoLegend()
+ggsave(p,file="M8_highlighted_siletti_nolegend.tiff")
+
+p=DimPlot(clustered_siletti, group.by = "integrated_snn_res.0.4", label = T)+NoLegend()
+ggsave(p,file="Siletti_integrated_clusters_nolegend.tiff")
+```
+```{r}
+Idents(clustered_siletti) <- "region"
+DimPlot(clustered_siletti, label=F, cells.highlight=WhichCells(clustered_siletti, idents = "midbrain"), cols.highlight = "darkred", cols= "grey")
+DimPlot(clustered_siletti, label=F, cells.highlight=WhichCells(clustered_siletti, idents = "SNCTRL"), cols.highlight = "darkred", cols= "grey")
+Idents(clustered_siletti) <- "dissection"
+
+DimPlot(clustered_siletti, label=F, cells.highlight=WhichCells(clustered_siletti, idents = "Midbrain (M) - Substantia Nigra - SN"), cols.highlight = "darkred", cols= "grey")
+
+```
+
+
+```{r}
+
+#Idents(clustered_siletti) <- "zena_cluster_name"
+#DimPlot(clustered_siletti, label=T, group.by="zena_cluster_name", cells.highlight=WhichCells(clustered_siletti, idents = "Zena_8"), cols.highlight = "darkred", cols= "grey")
+#Idents(clustered_siletti) <- "dis"
+#DimPlot(clustered_siletti, label=T, group.by="region", cells.highlight=WhichCells(clustered_siletti, idents = "midbrain"), cols.highlight = "darkred", cols= "grey")
+```
+
+```{r}
+Idents(clustered_siletti) <- "integrated_snn_res.0.4"
+
+Idents(clustered_siletti) <- factor(clustered_siletti@active.ident, 
+                            levels=c("0","1", "2", "3", "4","5","6","7","8","9","10","11","12","13","14"))
+```
+
+
+```{r}
+
+DefaultAssay(clustered_siletti) <- "RNA"
+#Idents(clustered_siletti) <- "integrated_snn_res.0.4"
+p=DotPlot(clustered_siletti, features = c("CD83","HSPH1", "HSP90AA1", "HIF1A", "HSPB1", "GPR183","BCAS2", "NAMPT", "TRA2B"), cols = c("lightgrey", "red"))+RotatedAxis()
+ggsave(p, file="integratedSiletticlusters_dotplot.tiff", height = 4, width = 6)
+```
+
+
+```{r}
+table(clustered_siletti$integrated_snn_res.0.4, clustered_siletti$zena_cluster_name)
+table(clustered_siletti$integrated_snn_res.0.4, clustered_siletti$sex)
+
+```
+
+```{r}
+table(clustered_siletti$donor_id)
+#table(clustered_siletti$donor_id,clustered_siletti$region)
+table(clustered_siletti$integrated_snn_res.0.4,clustered_siletti$region)
+table(clustered_siletti$donor_id,clustered_siletti$region)
+
+```
+
+```{r}
+df2_combined <- df2_combined%>%
+  group_by(donor,region)%>%
+  mutate(fraction = frequency/sum(frequency))
+
+ggplot(df2_combined, aes(x=cluster, y=fraction, fill=region)) + 
+  geom_boxplot()+RotatedAxis()
+
+ggplot(df2_combined, aes(x=cluster, y=log(fraction), fill=region)) + 
+  geom_boxplot()+RotatedAxis()
+```
+
+
+```{r}
+Idents(clustered_siletti) <- "dataset"
+columbia <- subset(clustered_siletti, idents = "Columbia")
+siletti <- subset(clustered_siletti, idents = "Siletti_etal")
+
+df_columbia <- as.data.frame(table(columbia$donor_id,columbia$region, columbia$integrated_snn_res.0.4))#, label_transfer_Kamath$Status))
+colnames(df_columbia)<-c("donor","region", "cluster", "frequency")
+
+df_siletti <- as.data.frame(table(siletti$donor_id,siletti$region, siletti$integrated_snn_res.0.4))#, label_transfer_Kamath$Status))
+colnames(df_siletti)<-c("donor","region", "cluster", "frequency")
+
+df2_combined <- rbind(df_columbia, df_siletti)
+
+df2_combined <- df2_combined%>%
+  group_by(donor,region)%>% #frequency=no. of nuclei per donor/region/cluster 
+  mutate(fraction = frequency/sum(frequency)) ##  freq/total nuclei for the donor
+
+ggplot(df2_combined, aes(x=cluster, y=fraction, fill=region)) + 
+  geom_boxplot()+RotatedAxis()
+
+ggplot(df2_combined, aes(x=cluster, y=log(fraction), fill=region)) + 
+  geom_boxplot()+RotatedAxis()
+
+```
+```{r}
+df_combined_c7 <- df2_combined[df2_combined$cluster=="7",]
+
+ggplot(df_combined_c7, aes(x=cluster, y=fraction, fill=region)) + 
+  geom_boxplot()+RotatedAxis()
+
+ggplot(df_combined_c7, aes(x=cluster, y=log(fraction), fill=region)) + 
+  geom_boxplot()+RotatedAxis()
+
+```
+```{r}
+write.csv(df_combined_c7, file = "Siletti_boxplot_table.csv")
+```
+
+
+```{r}
+p=ggplot(df_combined_c7, aes(x=cluster, y=fraction, fill=region)) + 
+  geom_boxplot()+RotatedAxis()+theme_bw()+
+  
+  scale_fill_brewer(name = "region",palette="Set1")+
+  scale_y_continuous(trans="log10")+
+  ylab("Proportion")+
+  xlab("")#+
+  #theme(legend.position = c(0.9255, 0.8),
+    #    legend.background = element_rect(
+     #     size=0.5, linetype="solid", 
+    #      color ="black"))
+
+ggsave(p, file="box.png")
+```
+
+
+####prepare for MASC
+
+
+```{r}
+table(clustered_siletti$age)
+#table(clustered_siletti$combined_age, clustered_siletti$dataset)
+
+```
+
+##MASC function below
+```{r}
+#run masc
+#library(tidyverse)
+require(lme4)
+library(dplyr)
+#masc function
+#############
+MASC <- function(dataset, cluster, contrast, random_effects,
+                 fixed_effects = NULL, verbose = FALSE, save_models = FALSE,
+                 save_model_dir = NULL){
+  if(is.factor(dataset[[contrast]]) == FALSE) {
+    stop("Specified contrast term is not coded as a factor in dataset")
+  }
+  cluster <- as.character(cluster)
+  designmat <- model.matrix(~cluster + 0, data.frame(cluster = cluster))
+  dataset <- cbind(designmat, dataset)
+  cluster <- as.character(cluster)
+  designmat <- model.matrix(~cluster + 0, data.frame(cluster = cluster))
+  dataset <- cbind(designmat, dataset)
+  res <- vector(mode = "list", length = length(unique(cluster)))
+  names(res) <- attributes(designmat)$dimnames[[2]]
+  if(!is.null(fixed_effects) && !is.null(random_effects)){
+    model_rhs <- paste0(c(paste0(fixed_effects, collapse = " + "),
+                          paste0("(1|", random_effects, ")", collapse = " + ")),
+                        collapse = " + ")
+    if(verbose == TRUE) {
+      message(paste("Using null model:", "cluster ~", model_rhs))
+    }
+  } else if(!is.null(fixed_effects) && is.null(random_effects)){
+    model_rhs <- paste0(fixed_effects, collapse = " + ")
+    if (verbose == TRUE) {
+      message(paste("Using null model:", "cluster ~", model_rhs))
+      stop("No random effects specified")
+    }
+  } else if(is.null(fixed_effects) && !is.null(random_effects)){
+    model_rhs <- paste0("(1|", random_effects, ")", collapse = " + ")
+    if (verbose == TRUE) {
+      message(paste("Using null model:", "cluster ~", model_rhs))
+    }
+  } else{
+    model_rhs <- "1"
+    if(verbose == TRUE) {
+      message(paste("Using null model:", "cluster ~", model_rhs))
+      stop("No random or fixed effects specified")
+    }
+  }
+  cluster_models <- vector(mode = "list", length = length(attributes(designmat)$dimnames[[2]]))
+  names(cluster_models) <- attributes(designmat)$dimnames[[2]]
+  print("Beginning Modelling")
+  for(i in seq_along(attributes(designmat)$dimnames[[2]])) {
+    test_cluster <- attributes(designmat)$dimnames[[2]][i]
+    if(verbose == TRUE) {
+      message(paste("Creating logistic mixed models for",
+                    test_cluster))
+    }
+    dataset[,i] <- factor(dataset[,i])
+    null_fm <- as.formula(paste0(c(paste0(test_cluster, " ~ 1 + "),
+                                   model_rhs), collapse = ""))
+    full_fm <- as.formula(paste0(c(paste0(test_cluster, " ~ ",
+                                          contrast, " + "), model_rhs), collapse = ""))
+    null_model <- lme4::glmer(formula = null_fm, data = dataset,
+                              family = binomial, nAGQ = 1, verbose = 0, control = glmerControl(optimizer = "bobyqa"))
+    full_model <- lme4::glmer(formula = full_fm, data = dataset,
+                              family = binomial, nAGQ = 1, verbose = 0, control = glmerControl(optimizer = "bobyqa"))
+    model_lrt <- anova(null_model, full_model)
+    contrast_lvl2 <- paste0(contrast, levels(dataset[[contrast]])[2])
+    contrast_ci <- confint.merMod(full_model, method = "Wald",
+                                  parm = contrast_lvl2)
+    cluster_models[[i]]$null_model <- null_model
+    cluster_models[[i]]$full_model <- full_model
+    cluster_models[[i]]$model_lrt <- model_lrt
+    cluster_models[[i]]$confint <- contrast_ci
+  }
+  output <- data.frame(cluster = attributes(designmat)$dimnames[[2]],
+                       size = colSums(designmat))
+  output$model.pvalue <- sapply(cluster_models, function(x) x$model_lrt[["Pr(>Chisq)"]][2])
+  output[[paste(contrast_lvl2, "OR", sep = ".")]] <- sapply(cluster_models,
+                                                            function(x) exp(fixef(x$full)[[contrast_lvl2]]))
+  output[[paste(contrast_lvl2, "OR", "95pct.ci.lower", sep = ".")]] <- sapply(cluster_models,
+                                                                              function(x) exp(x$confint[contrast_lvl2, "2.5 %"]))
+  output[[paste(contrast_lvl2, "OR", "95pct.ci.upper", sep = ".")]] <- sapply(cluster_models,
+                                                                              function(x) exp(x$confint[contrast_lvl2, "97.5 %"]))
+  if(save_models == TRUE){
+    saveModelObj(cluster_models, save_dir = save_model_dir)
+    return(output)
+  }
+  else{
+    return(output)
+  }
+}
+####################
+```
+
+```{r}
+metadata <- clustered_siletti@meta.data
+```
+
+
+
+```{r}
+table(metadata$region)
+```
+
+
+```{r}
+# Define a vector of regions to include (not including )
+metadata$region <- gsub(" ", "_",metadata$region)
+
+regions <- c("cerebellum","cerebral_cortex", "cerebral_nuclei", "midbrain", "hippocampal_formation", "hypothalamus","myelencephalon", "pons", "thalamic_complex")
+
+# Loop over regions
+for (region in regions) {
+  # Define the keepindices for this region and SNCTRL
+  keepindices <- which(metadata$region %in% c(region, "SNCTRL"))
+  
+  # Subset the metadata for this region and SNCTRL
+  meta <- metadata[keepindices,]
+  meta$region <- factor(meta$region)
+  #meta$sex <- factor(meta$sex)
+  #meta$age <- factor(meta$age)
+  meta$donor_id <- factor(meta$donor_id)
+  
+  # Run the MASC analysis for this region and SNCTRL
+  MASC_res_region_SNCTRL <- MASC(data=meta, cluster=meta$integrated_snn_res.0.4, 
+                                 contrast = "region", random_effects = "donor_id",
+                                 verbose=T) %>%
+    dplyr::mutate(fdr = p.adjust(model.pvalue, method = "fdr")) %>%
+    dplyr::arrange(model.pvalue)
+  
+  # Assign the results to a variable with a name based on the region
+  assign(paste0("noSex_MASC_res_", region, "_vs_SNCTRL"), MASC_res_region_SNCTRL)
+}
+```
+```{r}
+# Define a vector of regions to include (not including )
+metadata$region <- gsub(" ", "_",metadata$region)
+
+regions <- c("cerebellum","cerebral_cortex", "cerebral_nuclei", "midbrain", "hippocampal_formation", "hypothalamus", "thalamic_complex")
+
+# Loop over regions
+for (region in regions) {
+  # Define the keepindices for this region and SNCTRL
+  keepindices <- which(metadata$region %in% c(region, "SNCTRL"))
+  
+  # Subset the metadata for this region and SNCTRL
+  meta <- metadata[keepindices,]
+  meta$region <- factor(meta$region)
+  #meta$sex <- factor(meta$sex)
+  #meta$age <- factor(meta$age)
+  meta$donor_id <- factor(meta$donor_id)
+  
+  # Run the MASC analysis for this region and SNCTRL
+  MASC_res_region_SNCTRL <- MASC(data=meta, cluster=meta$integrated_snn_res.0.4, 
+                                 contrast = "region", random_effects = "donor_id",
+                                 verbose=T) %>%
+    dplyr::mutate(fdr = p.adjust(model.pvalue, method = "fdr")) %>%
+    dplyr::arrange(model.pvalue)
+  
+  # Assign the results to a variable with a name based on the region
+  assign(paste0("noSex_MASC_res_", region, "_vs_SNCTRL"), MASC_res_region_SNCTRL)
+}
+```
+
+###combine the output of MASC files and extract out cluster 7 from all these outputs and make a new table. in teh below code I fisrt merge the results wich had same column. THalamic complex had diff column name os that was merged later
+```{r}
+noSex_MASC_res_midbrain_vs_SNCTRL
+# Define a list of data frame names to process
+df_list <- list("noSex_MASC_res_hippocampal_formation_vs_SNCTRL", "noSex_MASC_res_cerebellum_vs_SNCTRL", "noSex_MASC_res_cerebral_cortex_vs_SNCTRL", "noSex_MASC_res_cerebral_nuclei_vs_SNCTRL", "noSex_MASC_res_hypothalamus_vs_SNCTRL", "noSex_MASC_res_midbrain_vs_SNCTRL","noSex_MASC_res_myelencephalon_vs_SNCTRL"
+                , "noSex_MASC_res_pons_vs_SNCTRL")
+
+# Create an empty list to store the results
+results_list <- list()
+
+# Loop through each data frame and extract the "cluster7" row
+for (df_name in df_list) {
+  # Load the data frame
+  df <- get(df_name)
+  
+  # Extract the "cluster7" row and store it in the list
+  results_list[[df_name]] <- df %>%
+    filter(cluster == "cluster7") %>%
+    select(-cluster)
+}
+
+# Combine the list of results into a single data frame
+results_df <- do.call(rbind, results_list)
+```
+
+
+```{r}
+results_df$region <- rownames(results_df)
+results_df$upper <- results_df$regionSNCTRL.OR.95pct.ci.upper
+results_df$lower <- results_df$regionSNCTRL.OR.95pct.ci.lower
+results_df$OddsRatio <- results_df$regionSNCTRL.OR
+
+results_df$regionSNCTRL.OR.95pct.ci.upper <- NULL
+results_df$regionSNCTRL.OR.95pct.ci.lower <- NULL
+results_df$regionSNCTRL.OR <- NULL
+```
+
+```{r}
+res_thalamic <- noSex_MASC_res_thalamic_complex_vs_SNCTRL %>%
+    filter(cluster == "cluster7") %>%
+    select(-cluster)
+res_thalamic[1,3]= 1/res_thalamic[1,3]
+res_thalamic[1,4]= 1/res_thalamic[1,4]
+res_thalamic[1,5]= 1/res_thalamic[1,5]
+
+res_thalamic$region <- rownames(res_thalamic)
+res_thalamic$lower <- res_thalamic$regionthalamic_complex.OR.95pct.ci.upper
+res_thalamic$upper <- res_thalamic$regionthalamic_complex.OR.95pct.ci.lower
+res_thalamic$OddsRatio <- res_thalamic$regionthalamic_complex.OR
+
+res_thalamic$regionthalamic_complex.OR.95pct.ci.upper <- NULL
+res_thalamic$regionthalamic_complex.OR.95pct.ci.lower <- NULL
+res_thalamic$regionthalamic_complex.OR <- NULL
+```
+```{r}
+result_combined_table <- rbind(results_df,res_thalamic)
+result_combined_table$region <- c("hippocampal_formation_vs_SNCTRL", "cerebellum_vs_SNCTRL","cerebral_cortex_vs_SNCTRL","cerebral_nuclei_vs_SNCTRL", "hypothalamus_vs_SNCTRL","midbrain_vs_SNCTRL","myelencephalon_vs_SNCTRL", "pons_vs_SNCTRL", "thalamic_compex_vs_SNCTRL")
+```
+
+```{r}
+write.csv(result_combined_table, file="i-7_pairwise_region_MASC.csv")
+```
+
+
+```{r}
+
+or <- ggplot(data=result_combined_table %>% as_tibble() %>% 
+               mutate(region = str_remove(region,"_vs_SNCTRL"),
+                      region = str_replace(region,"_","\n")) %>%
+               arrange(size) %>%
+               mutate(region = factor(region, levels = region),
+                      sig = factor(ifelse((log2(upper) >=0) & (log2(lower) <= 0), "longdash","solid"))),
+             aes(x=region, y=log2(OddsRatio), ymin=log2(lower), ymax=log2(upper),
+                 color=log2(OddsRatio),
+                 linetype = sig)) +
+  geom_point(aes(size =log2(size))) + 
+  geom_errorbar(width=.2,size=.5) +
+  labs(title='Other_regions vs SN Control', y='log(OddsRatio)', x = 'Cluster') +# xlim(-10,20) +
+  geom_hline(yintercept=0, color='black', linetype='dashed', alpha=.5) +
+  scale_color_gradient(low="blue",high="red")+
+  scale_linetype_manual(values = c("longdash"="longdash","solid"="solid"))+
+  theme_bw()+
+  guides(linetype = "none",
+         color = "none", size="none")+
+  ylab(expression(log[2](OR)))+
+  xlab("")+
+  theme(axis.text = element_text(size=12))+
+  coord_flip()
+or
+
+
+ggsave(or, file="OR.png")
+
+
+```
+```{r}
+
+```
+
+
+
+
+```{r}
+#result_combined_table$region <- rownames(result_combined_table)
+summary_OR <- sum(result_combined_table$OddsRatio) / nrow(result_combined_table)
+result_combined_table |>  
+  forestplot( 
+           mean=OddsRatio,
+            lower = lower, 
+           upper = upper, 
+           labeltext = region, 
+           xlab = "Odds Ratio", 
+           col = fpColors(box="black", line="black", summary="black"), 
+           boxsize = 0.3,
+            xlim = c(-1, 1),
+           zero = summary_OR,
+           clip = c(-1, 1),
+           #txt_gp = fpTxtGp(label = gpar(cex = 0.8)),
+           #cex = 0.8,
+           #hrzl_lines = list(y = 0, lty = "dashed"),
+           #is.summary = c(TRUE, FALSE, FALSE, FALSE),
+           #graph.pos = 2,
+           #fn.ci_norm = fpDrawNormalCI,
+           lwd.ci_norm = 0.5)
+         # labeltext= c(cluster,new_subothers.OR),
+           #  clip = c(0.1, 2.5))
+            # xlog = TRUE)) |>
+  
+   
+```
+
+```{r}
+#table(metadata$donor_id,metadata$sex)
+table(metadata$region,metadata$age)
+
+```
+
+##Siletti SN
+  Midbrain (M) - Inferior colliculus and nearby nuclei - IC                                                                                                                                                 0
+  Midbrain (M) - Periaqueductal gray and Dorsal raphe nucleus - PAG-DR                                                                                                                                      0
+  Midbrain (M) - Periaqueductal gray and nearby nuclei - PAG                                                                                                                                                0
+  Midbrain (M) - Pretectal region - PTR                                                                                                                                                                     0
+  Midbrain (M) - Substantia Nigra - SN                                                                                                                                                                      0
+  Midbrain (M) - Substantia Nigra and Red Nucleus - SN-RN                                                                                                                                                   0
+  Midbrain (M) - Substantia Nigra, Red Nucleus, and nearby nuclei - SN-RN                                                                                                                                   0
+  Midbrain (M) - Superior colliculus and nearby nuclei - SC                                                                                                                                                 0
+  Midbrain (RN) - Red Nucleus - RN                                                         
+
+
+```{r}
+
+df_columbia <- as.data.frame(table(columbia$donor_id,columbia$region, columbia$integrated_snn_res.0.4))#, label_transfer_Kamath$Status))
+colnames(df_columbia)<-c("donor","region", "cluster", "frequency")
+
+
+df_siletti_dissection <- as.data.frame(table(siletti$donor_id,siletti$dissection, siletti$integrated_snn_res.0.4))#, label_transfer_Kamath$Status))
+colnames(df_siletti_dissection)<-c("donor","region", "cluster", "frequency")
+
+
+
+df2_combined <- rbind(df_columbia, df_siletti_dissection)
+df2_combined <- df2_combined%>% ## this step needs to be done before subsetting
+  group_by(donor,region)%>%
+  mutate(fraction = frequency/sum(frequency))
+
+df_combined_c7 <- df2_combined[df2_combined$cluster=="7",]
+subset_df7 <- df_combined_c7[grepl("Midbrain|SNCTRL", df_combined_c7$region), ]
+
+
+
+```
+
+
+```{r}
+
+
+ggplot(subset_df7, aes(x=cluster, y=fraction, fill=region)) + 
+  geom_boxplot()+RotatedAxis()
+
+ggplot(subset_df7, aes(x=cluster, y=log(fraction), fill=region)) + 
+  geom_boxplot()+RotatedAxis()
+
+```
+```{r}
+table(clustered_siletti$donor_id)
+
+```
+
+```{r}
+Idents(siletti) <- "region"
+siletti_midbrain <- subset(siletti, idents = "midbrain")
+```
+
+```{r}
+table(siletti_midbrain$dissection)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
