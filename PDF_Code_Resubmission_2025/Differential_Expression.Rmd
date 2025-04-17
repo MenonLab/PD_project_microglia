@@ -1,0 +1,115 @@
+---
+title: "Differential Expression"
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+Purpose: The purpose of this notebook is to:
+1) identify differentially expressed genes in Parkinson's disease versus control sustantia nigra samples for each microglial subcluster 
+2) Investigate whether any differentially expressed genes for each cluster in disease are PD GWAS hits
+
+# Set up
+#### Working directory
+```{r setup}
+knitr::opts_knit$set(root.dir = "/Users/zkchatila/Desktop/SingleNuc/micro/integration")
+```
+
+```{r}
+library(devtools)
+library(Seurat)
+library(dplyr)
+library(purrr)
+library(edgeR)
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(limma)
+library(Libra)
+```
+
+# Extract raw counts
+```{r}
+# Extract raw counts from Seurat object
+microSN <- micro %>%
+  subset(Region == "SN")
+
+microSN@meta.data %>%
+  droplevels()
+
+glimpse(microSN@meta.data)
+
+microSN@meta.data <- microSN@meta.data %>%
+  mutate(Disease = as.factor(Disease),
+         Disease = factor(Disease, levels = c("NPC", "PD")))
+         
+counts <- JoinLayers(microSN)[["RNA"]]$counts
+
+# Extract metadata
+meta <- microSN@meta.data
+
+# Pseudobulk and Limma
+de <- Libra:: run_de(
+		  counts,
+                  meta = meta,
+                  replicate_col = "Donor", #column in meta storing your people IDs (biological replicates)
+                  cell_type_col = "final_names", # column in meta with cell types
+                  label_col = "Disease", # column in meta with diagnosis information (controls vs cases)
+                  min_cells = 3,
+                  min_reps = 2,
+                  min_features = 0,
+                  de_family = "pseudobulk",
+                  de_method = "limma",
+                  de_type = "voom",
+                  n_threads = 2,
+                  model = NULL,
+                  )
+write.csv(de, "DE_SN.csv")
+de <- read.csv("DE_SN.csv")
+```
+
+# Identify PD GWAS hits in differentially expressed genes
+```{r}
+de <- read.csv("DE_SN.csv")
+PD_GWAS_markers <- read.csv("PDGWAS.csv")
+```
+
+```{r}
+sig_de <- de %>%
+  filter(fdr < 0.05)
+
+GWAS_expression_cd83 <- de %>%
+  filter(cell_type == "CD83_BCAS2") %>%
+  pull(gene) %>%
+  intersect(PD_GWAS_markers$gene)
+
+GWAS_expression_tmem163 <- de %>%
+  filter(cell_type == "TMEM163_HAMP") %>%
+  pull(gene) %>%
+  intersect(PD_GWAS_markers$gene)
+
+GWAS_expression_npas3 <- de %>%
+  filter(cell_type == "NPAS3_DLG2") %>%
+  pull(gene) %>%
+  intersect(PD_GWAS_markers$gene)
+
+GWAS_expression_pvm <- de %>%
+  filter(cell_type == "PVM") %>%
+  pull(gene) %>%
+  intersect(PD_GWAS_markers$gene)
+
+GWAS_expression_mono <- de %>%
+  filter(cell_type == "Mono") %>%
+  pull(gene) %>%
+  intersect(PD_GWAS_markers$gene)
+
+GWAS_expression_zbtb16 <- de %>%
+  filter(cell_type == "ZBTB16_NHSL1") %>%
+  pull(gene) %>%
+  intersect(PD_GWAS_markers$gene)
+```
+

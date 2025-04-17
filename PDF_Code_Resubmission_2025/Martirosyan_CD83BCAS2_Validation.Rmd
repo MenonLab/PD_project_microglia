@@ -1,0 +1,196 @@
+---
+title: "Martirosyan Validation"
+output: html_notebook
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+Purpose: The purpose of this notebook is to:
+1) Integrate the microlgial nuclei from our dataset with all microlial nuclei in the Martirosyan et al. (2024) dataset
+2) Identify microglia in the Smajic et al. dataset carrying the CD83_BCAS2 signature
+3) Perform proportion analysis to identify whether CD83_BCAS2 proportions differ in Parkinson's versus control donors from the Smajic et al. dataset.
+
+# Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Packages
+```{r}
+library(DT)
+library(knitr)
+library(Matrix)
+library(patchwork)
+library(Seurat)
+library(dplyr)
+library(harmony)
+library(ggplot2)
+```
+
+# Load Martirosyan data
+```{r}
+Martirosyan_toplevel <- readRDS("<path_to_datasetA>/input/toplevel_Martirosyan_object.rds")
+
+head(Martirosyan_toplevel@meta.data)
+table(Martirosyan_toplevel$broadclass)
+Assays(Martirosyan_toplevel)
+
+Idents(Martirosyan_toplevel) <- "broadclass"
+DefaultAssay(Martirosyan_toplevel) <- "RNA"
+Martirosyan_micro <- subset(Martirosyan_toplevel, idents = "Micro")
+```
+
+# Extract and save counts from Assay5 for the Microglia subset
+```{r}
+counts <- GetAssayData(Martirosyan_micro[["RNA"]], slot = "counts")
+meta <- Martirosyan_micro@meta.data
+
+# Save counts and metadata
+saveRDS(counts, file="Martirosyan_counts.RDS")
+saveRDS(meta, file="Martirosyan_meta.RDS")
+```
+
+# Load and process Martirosyan object
+```{r}
+Martirosyan_meta <- readRDS("Path/To/Directory/Martirosyan_meta.RDS")
+Martirosyan_counts <- readRDS("Path/To/Directory/Martirosyan_counts.RDS")
+
+Martirosyan_obj <- CreateSeuratObject(Martirosyan_counts, meta.data = Martirosyan_meta)
+Martirosyan_obj$Region <- "Martirosyan_SNpc"
+Martirosyan_obj$dataset <- "Martirosyan_study"
+Martirosyan_obj$Region_disease <- paste("SNpc", Martirosyan_obj$Clinical.diagnosis, sep = "_")
+Martirosyan_obj$donor_id <- Martirosyan_obj$Sample.ID
+Martirosyan_obj$Sample.ID <- NULL
+Martirosyan_obj$Brain.Bank.ID <- NULL
+
+head(Martirosyan_obj@meta.data)
+
+DefaultAssay(Martirosyan_obj) <- "RNA"
+```
+
+# Load and process chatila object
+```{r}
+chatila_obj <- readRDS("Path/To/Directory/ChatilaObject.rds")
+head(chatila_obj@meta.data)
+
+# Create a new column by joining 'Region' and 'Disease'
+new_column <- paste(chatila_obj$Region, chatila_obj$Disease, sep = "_")
+chatila_obj <- AddMetaData(object = chatila_obj, metadata = new_column, col.name = "Region_disease")
+chatila_obj$chatila_cluster_name <- chatila_obj$final_names
+
+chatila_obj@assays$RNA@layers$data <- NULL
+chatila_obj@assays$RNA@layers$scale.data <- NULL
+
+chatila_obj$donor_id <- chatila_obj$Donor
+chatila_obj$Donor <- NULL
+chatila_obj$dataset <- "Columbia"
+
+head(chatila_obj@meta.data)
+
+print("chatila_obj prepared")
+```
+
+# Combine the Martirosyan and chatila objects
+```{r}
+combined_obj <- merge(Martirosyan_obj, chatila_obj)
+combined_obj <- NormalizeData(combined_obj)
+combined_obj <- FindVariableFeatures(combined_obj)
+combined_obj <- ScaleData(combined_obj)
+combined_obj <- RunPCA(combined_obj)
+print("Normalisation done")
+```
+
+# Integrate data using Harmony
+```{r}
+combined_obj <- IntegrateLayers(object = combined_obj, method = HarmonyIntegration, orig.reduction = "pca", new.reduction = "harmony", verbose = FALSE)
+
+combined_obj <- FindNeighbors(object = combined_obj, dims = 1:20, reduction = "harmony")
+combined_obj <- FindClusters(object = combined_obj, resolution = c(0.2, 0.3, 0.4, 0.5))
+combined_obj <- RunUMAP(object = combined_obj, reduction = "harmony", dims = 1:20)
+
+# Save combined object
+saveRDS(combined_obj, file="umap_bydataset_Martirosyan_chatila_lognorm_harmony_micro.rds")
+```
+
+# Plot and save the results
+```{r}
+pdf("bydonor_20pcs_lognorm_microglia_AY_Martirosyan.pdf", useDingbats = F)
+p1 = ElbowPlot(combined_obj, ndims = 30); plot(p1)
+p1 = DimPlot(combined_obj, reduction = "umap", group.by = "donor_id") + NoLegend(); plot(p1)
+p1 = DimPlot(combined_obj, reduction = "umap", group.by = "donor_id"); plot(p1)
+p1 = DimPlot(combined_obj, reduction = "umap", group.by = "dataset"); plot(p1)
+p1 = DimPlot(combined_obj, reduction = "umap", split.by = "dataset"); plot(p1)
+p1 = DimPlot(combined_obj, reduction = "umap", group.by = "Region_disease"); plot(p1)
+p1 = DimPlot(combined_obj, reduction = "umap", group.by = "chatila_cluster_name", label = T); plot(p1)
+p1 = DimPlot(combined_obj, reduction = "umap", group.by = "RNA_snn_res.0.2", label = T); plot(p1)
+dev.off()
+T
+```
+
+# Load metadata
+```{r}
+# Load and explore data
+data_file <- "mol_degen.tsv.gz"
+if (file.exists(data_file)) {
+  meta <- vroom::vroom(data_file)
+} else {
+  mol_degen <- readRDS("umap_bydataset_Martirosyan_chatila_lognorm_harmony_micro")
+  vroom::vroom_write(mol_degen@meta.data, data_file)
+}
+```
+
+# Compute props for Martirosyan data
+```{r}
+props_mol_degen <- meta %>%
+  group_by(donor_id) %>%
+  filter(dataset == "Martirosyan_study") %>%
+  filter(n() > 100) %>%
+  ungroup() %>%
+  mutate(across(starts_with("RNA_snn_res.0."), as.character)) %>%
+  mutate(RNA_snn_res.0.4 = paste0("cluster_", RNA_snn_res.0.3)) %>%
+  mutate(donor_id = paste0("donor_", donor_id)) %>%
+  dplyr::select(all_of(c("RNA_snn_res.0.4", "Clinical.diagnosis",
+                         "Sex", "Age", "donor_id"))) %>%
+  get_props("donor_id", "RNA_snn_res.0.4") %>%
+  mutate(Clinical.diagnosis = as.factor(Clinical.diagnosis),
+         Clinical.diagnosis = factor(Clinical.diagnosis,
+                                     levels = c("Control", "Parkinson's")),
+         Sex = as.factor(Sex),
+         Sex = factor(Sex, levels = c("female", "male")))
+glimpse(props_mol_degen)
+
+stopifnot(nrow(props_mol_degen) == 364 & ncol(props_mol_degen) == 7)
+
+props_mol_degen %>%
+  mutate(across(starts_with("RNA_snn_res.0."), as.factor)) %>%
+  datatable()
+
+# Define cell types
+cell_types <- unique(props_mol_degen$RNA_snn_res.0.4)
+cell_types <- structure(cell_types, names = cell_types)
+```
+
+# Prop analysis for Martirosyan data
+• Cluster 11 at res 0.4 carries the CD83_BCAS2 signature
+```{r}
+# SN comparison: robust GLM of SN
+comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ Clinical.diagnosis + Age + Sex,
+                       subset(props_mol_degen, RNA_snn_res.0.4 == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = F)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  datatable()
+```

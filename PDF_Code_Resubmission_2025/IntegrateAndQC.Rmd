@@ -1,0 +1,237 @@
+---
+title: "Integrate and QC"
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document:
+    df_print: paged
+    toc: TRUE
+    number_sections: TRUE
+editor_options:
+  chunk_output_type: inline
+---
+# Description
+The purpose of this notebook is to integrate the two batches of microglial data from our PD dataset and perform QC on the clustered nuclei. In this case, we used harmony to integrate the data by batch. We assessed quality of the clustered nuclei through identifying RNA  and feature counts as well as differential gene expression. We removed a cluster of low quality nuclei, as well as few t cells that had clustered with the monocytes. This notebook ultimately produces a cleaned microglial dataset that can be used as a starting point for defining microglial taxonomy in PD. 
+
+# Set up
+#### Load packages and set seed
+```{r warning = F, message = F}
+set.seed(123)
+library(tictoc)
+library(Matrix)
+library(ggplot2)
+library(cowplot)
+library(DT)
+library(magrittr)
+library(dplyr)
+library(Seurat)
+```
+
+#### General options
+```{r warning = F, message = F}
+options(dplyr.summarise.inform = F, DT.options = list(
+  pageLength = 10, language = list(search = 'Filter:'), extensions = 'Buttons',
+  filter = 'top', buttons = 'csv', autoWidth = T, scrollX = T, scrollY = T
+  ))
+
+Subset <- SeuratObject:::subset.Seurat
+```
+
+# Read in master seurat object
+```{r}
+micro <- readRDS("micro_merged.rda")
+stopifnot(ncol(micro) == 84477 & nrow(micro) == 22177)
+glimpse(micro@meta.data)
+```
+
+# Integrate two batches and run Seurat pipeline
+```{r message = FALSE, warning = F, results = 'hold'}
+micro[["RNA"]] <- split(micro[["RNA"]], f = micro$batch)
+
+tic("Seurat's pca pipiline")
+micro <- NormalizeData(micro, assay = "RNA") %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA()
+toc()
+
+tic("Integration")
+micro <- IntegrateLayers(
+  micro, method = HarmonyIntegration, orig.reduction = "pca",
+  new.reduction = "integrated.harmony", theta = 5, k.weight = 20, k.anchor = 20,
+  verbose = T)
+toc() #163.344 sec elapsed
+
+# Re-join layers after integration
+micro[["RNA"]] <- JoinLayers(micro[["RNA"]])
+
+tic("Find Neighbors, clusters, and run UMAP")
+micro <- FindNeighbors(micro, dims = 1:20, reduction = "integrated.harmony") %>%
+  FindClusters(resolution = c(.3, .4, .5), verbose = F) %>%
+  RunUMAP(reduction = "integrated.harmony", dims = 1:20)
+toc() #109.772 sec elapsed
+```
+
+# Evaluate clustering solution
+## Cell type markers across resolutions
+```{r fig.height = 8, fig.width = 10}
+# Assign cell type markers
+cell_type_markers <- c(
+  "SNAP25", "SYT1", "GAD1", "AQP4", "AIF1", "CSF1R", "PTPRC", "C1QA", "MOBP",
+  "MBP", "OPALIN", "OLIG1", "PDGFRA", "FLT1", "CLDN5", "MRC1", "CD163", "VCAN",
+  "LYZ", "CD3E", "CD209", "CD177"
+  )
+cluster_m8_markers <- c(
+  "HIF1A", "CD83", "HSPH1", "SLC7A5", "CD69", "CXCR4", "TMEM163", "IL1B",
+  "MKI67"
+  )
+
+# Select res to compare
+resolutions <- grep("RNA_snn_res.0.", colnames(micro@meta.data), value = T)
+
+# Plotting
+for (res in resolutions) {
+  message(res)
+  
+  # Set identity for plotting
+  Idents(micro) <- res
+  
+  # Plot umap
+  p1 <- DimPlot(micro, reduction = "umap", label = T) +
+    theme(legend.position = "right")
+          # legend.text = element_text(size = 8))
+
+  p2 <- DimPlot(micro, reduction = "umap", group.by = "batch", label = T) +
+    theme(legend.position = "right",
+          legend.text = element_text(size = 8))
+  
+  # Are the clusters contaminated with other brain cells?
+  p3 <- DotPlot(micro, features = cell_type_markers) +
+          RotatedAxis() +
+    theme(legend.position = "none",
+          legend.text = element_text(size = 8))
+  
+  # Are any of the clusters like m8?
+  p4 <- DotPlot(micro, features = cluster_m8_markers) +
+          RotatedAxis() +
+    theme(legend.position = "none",
+          legend.text = element_text(size = 8))
+  
+  # Cluster quality
+  p5 <- VlnPlot(micro, features = "nCount_RNA", pt.size = F) +
+    theme(legend.position = "none",
+          legend.text = element_text(size = 8))
+  p6 <- VlnPlot(micro, features = "nFeature_RNA", pt.size = F) +
+    theme(legend.position = "none",
+          legend.text = element_text(size = 8))
+
+  # Arrange plots
+  p <- plot_grid(p1, p2, p3, p4, p5, p6, ncol = 3, nrow = 2)
+  res_title <- ggdraw() +
+    draw_label(res)
+  p <- plot_grid(res_title, p, ncol = 1, rel_heights = c(0.1, 1))
+  print(p)
+}
+```
+
+### Select the best resolution
+```{r}
+micro$optimal_res <- paste0("cluster_", micro$RNA_snn_res.0.4)
+Idents(micro) <- micro$optimal_res
+```
+
+### Remove cluster 0
+Cluster 0 is comprised of cells with low UMI and genes. It likely corresponds to low-quality cells. I will remove and recluster.
+```{r}
+micro <- Subset(micro, optimal_res != "cluster_0")
+micro
+stopifnot(ncol(micro) == 68821)
+```
+
+### Remove T cells
+Some cells in cluster 12 express t cell markers FYN and CD3E, responding to t cell contamination in cluster 12. I will subset out cluster 12 and subcluster it to identify the contaminating t cells. I will then use those cell IDs to remove t cells from the larger micro object. After removing T cells and cluster 0, we will recluster the micro object
+
+```{r message = F}
+# separate out cluster 12 (monocytes and cluster to identify t cells)
+monocytes <- Subset(micro, optimal_res == "cluster_12")
+monocytes@meta.data %<>%
+  select(-all_of(starts_with("RNA_snn_res")))
+  
+# subcluster cluster 12
+monocytes <- NormalizeData(monocytes) %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA()
+
+ElbowPlot(monocytes, ndims = 30)
+
+# Clustering
+monocytes <- FindNeighbors(monocytes, dims = 1:15) %>%
+  FindClusters(resolution = c(0.1, 0.125, 0.15, 0.175, 0.2)) %>%
+  RunUMAP(reduction = "pca", dims = 1:15)
+
+# visualize monocytes
+tcell_vs_mono_markers <- c(
+  "CD3E", "ITK", "CD8A", "CD8B", "TRAC", "TRBC1", "LYZ", "VCAN", "CD14", "FLT1",
+  "CLDN5"
+  )
+
+# Select res to compare
+resolutions <- grep("RNA_snn_res.0.", colnames(monocytes@meta.data), value = T)
+
+# Plotting
+for (res in resolutions) {
+  message(res)
+  
+  # Set identity for plotting
+  Idents(monocytes) <- res
+  
+  # Plot umap
+  p1 <- DimPlot(monocytes, reduction = "umap", label = T) +
+          theme()
+  
+  # Which cells are monos vs t cells
+  p2 <- DotPlot(monocytes, features = tcell_vs_mono_markers) +
+          RotatedAxis() +
+          labs(title = res)
+  
+  # Cluster quality
+  p3 <- VlnPlot(monocytes, features = "nCount_RNA", pt.size = F) +
+          theme(legend.position = "none")
+  p4 <- VlnPlot(monocytes, features = "nFeature_RNA", pt.size = F) +
+           theme(legend.position = "none")
+  
+  # Quilt plots
+  p <- plot_grid(p1, p2, p3, p4, ncol = 2, nrow = 2)
+  res_title <- ggdraw() +
+    draw_label(res)
+  p <- plot_grid(res_title, p, ncol = 1, rel_heights = c(0.1, 1))
+  print(p)
+}
+```
+
+Of the monocyte object, clusters 0 and 2 express T cell markers, and cluster 4 is low quality expressing neither T cell nor monocyte markers. Clusters 1 and 3 express monocyte markers. With this information, we can keep clusters 1 and 3 as monocytes, and remove cluster 0, 2, and 4.
+```{r}
+cell_ids_tcells_mono <-
+  Cells(monocytes)[monocytes$RNA_snn_res.0.2 %in% c("0", "2", "4")]
+micro <- Subset(micro,
+                cells = Cells(micro)[!Cells(micro) %in% cell_ids_tcells_mono])
+micro
+stopifnot(ncol(micro) == 68559)
+```
+
+# Save
+```{r}
+# Delete clusterin solutions with t cells and contaminating nuclei
+micro@meta.data %<>%
+  select(-all_of(starts_with("RNA_snn_res")))
+
+# Save
+if (!file.exists("micro_integrated_and_QCed.rda")) {
+  saveRDS(micro, "micro_integrated_and_QCed.rda")
+}
+```
+
+# Sessioninfo
+```{r}
+sessionInfo()
+```

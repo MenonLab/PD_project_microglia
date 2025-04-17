@@ -1,0 +1,77 @@
+---
+title: "Parkinson's Disease GWAS Enrichment"
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+Purpose:The purpose of this file is to identify whether any microglial subpopulations in our dataset have enriched expression of Parkinson's disease GWAS hits within their differentially expressed genes. Differentially expressed genes for each cluster were caluclated in the "Defining Microglia Taxonomy" notebook. A list of PD GWAS hits was obtained from Nalls et al. 2019. 
+
+
+# Set Up
+## Load packages
+```{r}
+library(Seurat)
+library(dplyr)
+```
+
+
+# Read in DEGs and PD GWAS list
+This DEG gene list is from a LFC threshold of > 0.5
+```{r}
+micro_final_markers <- read.csv("micro_final_markers_wilcox.csv")
+PD_GWAS_markers <- read.csv("PDGWAS.csv")
+```
+
+# Identify PD GWAS hits in each cluster's marker genes
+```{r}
+clusters <- unique(micro_final_markers$cluster)
+GWAS_expression <- vector(mode = "list")
+GWAS_enrichment <- vector(mode = "list")
+for (i in clusters) {
+  GWAS_expression[[i]] <- micro_final_markers %>%
+    filter(cluster == (i)) %>%
+    pull(gene) %>%
+    intersect(PD_GWAS_markers$gene)
+}
+for (i in clusters) {
+  GWAS_enrichment[[i]] <- micro_final_markers %>%
+    filter(cluster == (i)) %>%
+    pull(gene) %>%
+    intersect(PD_GWAS_markers$gene) %>%
+    length()
+}
+```
+
+```{r}
+print.listof(GWAS_expression)
+```
+
+# Hypergeometric Test for GWAS enrichment
+```{r}
+clusters <- unique(micro_final_markers$cluster)
+hypergeo_test <- vector(mode = "list")
+for (i in clusters) {
+  hypergeo_test[[i]] <- phyper(
+    GWAS_enrichment[[i]],
+    85,
+    (22177 - 85),
+    micro_final_markers %>%
+      filter(cluster == (i)) %>%
+      pull(gene) %>%
+      length(),
+    lower.tail = FALSE
+    )
+}
+
+p_values <- p.adjust(hypergeo_test, method = "BH", n = length(hypergeo_test))
+p_values
+```
+
+Findings:
+TMEM163_HAMP, NPAS3_DLG2, P2RY12_CX3CR1, CD83_BCAS2, BAG3_CHORDC1 are enriched for PD GWAS hits. 
+

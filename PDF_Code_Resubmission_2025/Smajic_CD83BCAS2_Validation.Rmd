@@ -1,0 +1,175 @@
+---
+title: "Smajic Validation"
+output: html_notebook
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+Purpose: The purpose of this notebook is to:
+1) Integrate the microlgial nuclei from our dataset with all microlial nuclei in the Smajic et al. (2022) dataset
+2) Identify microglia in the Smajic et al. dataset carrying the CD83_BCAS2 signature
+3) Perform proportion analysis to identify whether CD83_BCAS2 proportions differ in Parkinson's versus control donors from the Smajic et al. dataset.
+
+# Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packges
+```{r}
+library(DT)
+library(knitr)
+library(Matrix)
+library(patchwork)
+library(dplyr)
+library(Seurat)
+library(ggplot2)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+# source get_props function for calculating proportions
+source("./get_props.R")
+# source robust_glm function for proportion analysis
+source("./robust_glm.R")
+```
+
+# Extract microglia from Smajic dataset 
+```{r}
+smajic <- readRDS("<path_to_datasetA>/input/toplevel_smajic_object.rds")
+Idents(smajic) <- "cell_ontology"
+DefaultAssay(smajic) <- "RNA"
+smajic_microglia <- subset(smajic, idents = "Microglia")
+
+smajic_counts <- smajic_microglia@assays$RNA@counts
+smajic_meta <- smajic_microglia@meta.data
+
+saveRDS(smajic_counts, file = "<output_path>/smajic_counts.RDS")
+saveRDS(smajic_meta, file = "<output_path>/smajic_meta.RDS")
+```
+
+# Convert Ensembl IDs to gene symbols
+```{r}
+ensembl_ids <- rownames(smajic_counts)
+gene_symbols <- mapIds(org.Hs.eg.db,
+                       keys = ensembl_ids,
+                       column = "SYMBOL",
+                       keytype = "ENSEMBL",
+                       multiVals = "first")
+gene_symbols_unique <- make.unique(ifelse(is.na(gene_symbols), ensembl_ids, gene_symbols))
+rownames(smajic_counts) <- gene_symbols_unique
+
+saveRDS(smajic_counts, file = "<output_path>/smajic_counts_converted_geneids.RDS")
+```
+
+# Prepare Smajic Seurat object
+```{r}
+smajic_meta <- readRDS("<output_path>/smajic_meta.RDS")
+smajic_counts <- readRDS("<output_path>/smajic_counts_converted_geneids.RDS")
+
+smajic_obj <- CreateSeuratObject(smajic_counts, meta.data = smajic_meta)
+smajic_obj$Region <- "smajic_midbrain"
+smajic_obj$dataset <- "smajic_etal"
+smajic_obj$Region_disease <- paste("midbrain", smajic_obj$condition, sep = "_")
+smajic_obj$donor_id <- smajic_obj$patient
+smajic_obj$patient <- NULL
+
+DefaultAssay(smajic_obj) <- "RNA"
+```
+
+# Prepare Chatila Seurat object
+```{r}
+chatila_obj <- readRDS("<path_to_datasetB>/input/chatila_microglia_final.rds")
+new_column <- paste(chatila_obj$Region, chatila_obj$Disease, sep = "_")
+chatila_obj <- AddMetaData(object = chatila_obj, metadata = new_column, col.name = "Region_disease")
+chatila_obj$zena_cluster_name <- chatila_obj$final_names
+
+chatila_obj@assays$RNA@layers$data <- NULL
+chatila_obj@assays$RNA@layers$scale.data <- NULL
+chatila_obj$donor_id <- chatila_obj$Donor
+chatila_obj$Donor <- NULL
+chatila_obj$dataset <- "chatila_etal"
+```
+
+# Merge and process combined object
+```{r}
+combined_obj <- merge(smajic_obj, chatila_obj)
+combined_obj <- NormalizeData(combined_obj)
+combined_obj <- FindVariableFeatures(combined_obj)
+combined_obj <- ScaleData(combined_obj)
+combined_obj <- RunPCA(combined_obj)
+```
+
+# Integration using CCA
+```{r}
+combined_obj <- IntegrateLayers(object = combined_obj,
+                                method = CCAIntegration,
+                                orig.reduction = "pca",
+                                new.reduction = "integrated.cca",
+                                verbose = FALSE)
+
+combined_obj <- FindNeighbors(object = combined_obj, dims = 1:30, reduction = "integrated.cca")
+combined_obj <- FindClusters(object = combined_obj, resolution = c(0.2, 0.3, 0.4, 0.5))
+combined_obj <- RunUMAP(object = combined_obj, reduction = "integrated.cca", dims = 1:30)
+```
+
+# Save processed Seurat object
+```{r}
+saveRDS(combined_obj, file = "<output_path>/umap_bydonor_smajic_chatila_lognorm_cca_micro.rds")
+```
+
+# Load metadata
+```{r}
+data_file <- "smajic.tsv.gz"
+if (file.exists(data_file)) {
+  meta <- vroom::vroom(data_file)
+} else {
+  smajic <- readRDS("umap_bydataset_smajic_zena_cca_micro.rds")
+  vroom::vroom_write(smajic@meta.data, data_file)
+}
+```
+
+# Compute props for Smajic data
+```{r}
+props_smajic <- meta %>%
+  group_by(donor_id) %>%
+  filter(dataset == "smajic_etal") %>%
+  filter(n() > 100) %>%
+  ungroup() %>%
+  mutate(across(starts_with("RNA_snn_res.0."), as.character)) %>%
+  select(c("donor_id", "RNA_snn_res.0.2", "condition",
+                   "sex", "age_at_death")) %>%
+  get_props("donor_id", "RNA_snn_res.0.2") %>%
+  mutate(condition = as.factor(condition),
+         condition = factor(condition, levels = c("Control", "IPD")),
+         sex = as.factor(sex),
+         sex = factor(sex, levels = c("M", "F")))
+glimpse(props_smajic)
+
+# Define cell types
+cell_types <- unique(props_smajic$RNA_snn_res.0.2)
+cell_types <- structure(cell_types, names = cell_types)
+```
+
+# Prop analysis for Smajic data
+• Integrated cluster 10 (res 0.2) carries the CD83_BCAS2 Signature
+```{r}
+# SN comparison: robust GLM of SN
+comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ condition + age_at_death + sex,
+                       subset(props_smajic, RNA_snn_res.0.2 == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = F)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  datatable()
+```

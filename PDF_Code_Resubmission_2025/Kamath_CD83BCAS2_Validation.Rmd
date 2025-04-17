@@ -1,0 +1,225 @@
+---
+title: "Kamath CD83_BCAS2 Validation"
+output: html_notebook
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+Purpose: The purpose of this notebook is to:
+1) Integrate the microglia from our dataset with the microglia from the Kamath et al (2022) dataset
+2) Idenfiy microglia carrying the CD83_BCAS2 signature
+3) Compute proportions of miroglia carrying the CD83_BCAS2 signature in Parkinson's disease versos control samples in the Kamath data
+
+# Load packages
+```{r}
+set.seed(0)
+library(DT)
+library(knitr)
+library(Matrix)
+library(patchwork)
+library(ggplot2)
+library(cowplot)
+library(ggpubr)
+library(Seurat)
+library(dplyr)
+library(tidyverse)
+library(harmony)
+setwd("/path/to/kamath_integration")
+```
+
+# LOAD DATASETS
+```{r}
+## load Kamath et al dataset
+Kamath_obj <- readRDS("kamath_integrated_microglia.rds")
+DefaultAssay(Kamath_obj) <- "integrated"
+Idents(Kamath_obj) <- "Cell_Type"
+Kamath_obj2=subset(Kamath_obj, idents=c("Macro_CD200R1","MG_MKI67"),invert=T)
+
+##load Chatila dataset
+micro_zena <- readRDS("micro_defined_taxonomy.rds")
+micro_zena$cluster_name <- micro_zena$final_names
+micro_zena$cluster_name <- gsub("^", "Zena_", micro_zena$cluster_name)
+
+# Create a new column by joining 'Region' and 'disease_status'
+new_column <- paste(micro_zena$Region, micro_zena$Disease, sep = "_")
+
+table(micro_zena$Region)
+table(micro_zena$cluster_name)
+
+Idents(micro_zena) <- "Region"
+Zena_subset=subset(micro_zena, idents="SN")
+
+Idents(Zena_subset) <- "cluster_name"
+Zena_subset2=subset(Zena_subset, idents=c("Zena_PVM","Zena_Mono"),invert=T)
+```
+
+# INTEGRATE BOTH DATASETS
+```{r}
+Kamath_obj2$dataset <- "Kamath"
+Zena_subset2$dataset <- "Zena"
+obj <- merge(Kamath_obj2, Zena_subset2 )
+DefaultAssay(obj) <- "RNA"
+ifnb.list <- SplitObject(obj, split.by = "dataset")
+
+# normalize and identify variable features for each dataset independently
+ifnb.list <- lapply(X = list(Kamath_obj2,Zena_subset2), FUN = function(x) {
+  DefaultAssay(x) <- "RNA"
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+
+features <- SelectIntegrationFeatures(object.list = ifnb.list)
+anchors <- FindIntegrationAnchors(object.list = ifnb.list, anchor.features = features)
+obj.combined <- IntegrateData(anchorset = anchors)
+DefaultAssay(obj.combined) <- "integrated"
+
+
+obj2=ScaleData(obj.combined)
+obj2=FindVariableFeatures(obj2)
+obj2=RunPCA(obj2)
+
+obj2=RunHarmony(obj2,group.by="dataset",dims=1:20)
+obj2=RunUMAP(obj2,reduction="harmony",dim=1:20)
+obj2=FindNeighbors(obj2,reduction="harmony",dims=1:20)
+obj2=FindClusters(obj2,resolution=.6)
+obj2$cluster_name2 <- obj2$cluster_name
+obj2$cluster_name2[obj2$dataset =="Kamath"] <- NA
+
+obj2$Cell_Type2 <- obj2$Cell_Type
+obj2$Cell_Type2[obj2$dataset =="Zena"] <- NA
+
+obj2=FindClusters(obj2,resolution=.3)
+
+saveRDS(obj2, file = "initial_merged_objects_v2.rds")
+```
+
+# PLOT DATA
+```{r}
+dp1 <- (DimPlot(obj2,label=T)+DimPlot(obj2, group.by="dataset", label=T))/
+  (DimPlot(obj2, group.by="cluster_name", label=T)+DimPlot(obj2, group.by="Cell_Type", label=T))
+ggsave(paste0("UMAP_Kamath_Zena_integrated_dims=20.png"), dp1, height=12, width=14)
+
+key_marks <- read.csv("micro_final_markers_wilcox_names.csv")
+
+dp <- DotPlot(obj2, features= key_marks %>%
+                dplyr::filter(final_names=="CD83_BCAS2", p_val_adj <= .05, pct.1-pct.2>=.4) %>% arrange(desc(pct.1-pct.2)) %>% dplyr::pull(gene),
+              cols = c("blue","lightgrey", "firebrick1"))+
+  scale_color_gradient2(low="blue", mid="lightgrey",high="firebrick1")+
+  coord_flip()
+
+png("CD83_BCAS2_markers_0.3.png", height=5,width=8,units="in", res=900)
+print(dp)
+dev.off()
+
+fp <- FeaturePlot(obj2, features= key_marks %>%
+                    dplyr::filter(final_names=="CD83_BCAS2", p_val_adj <= .05, pct.1-pct.2>=.4) %>% arrange(desc(pct.1-pct.2)) %>% dplyr::pull(gene) %>%
+                    head(9),
+                  ncol=3,cols=c("lightblue","lightgrey","firebrick1"))
+ggsave(paste0("Feature_plot_Kamath_Zena_integrated_no_preds_dims=20_0.3.png"),
+       fp, height=12, width=14)
+
+
+markers <- FindAllMarkers(obj2,pos.only=T)
+markers %>% group_by(cluster) %>%filter(pct.1-pct.2 >= .4)%>%  dplyr::summarize(n = dplyr::n())
+markers %>% write.csv("integrated_markers_0.4.csv",quote=F, row.names=F)
+
+dp <- DotPlot(obj2, features= markers %>%
+                dplyr::filter(cluster=="7", p_val_adj <= .05, pct.1-pct.2>=.3) %>% arrange(desc(pct.1-pct.2)) %>% dplyr::pull(gene),
+              cols = c("blue","lightgrey", "firebrick1"))+
+  scale_color_gradient2(low="blue", mid="lightgrey",high="firebrick1")+
+  coord_flip()
+png("/mnt/vast/hpc/homes/jm4454/PD_Lipids/ATAC/0203_CD83_BCAS2_markers_0.3_cluster_7_top_markers.png", height=5,width=8,units="in", res=900)
+print(dp)
+dev.off()
+
+
+obj_kamath <- subset(obj2, subset = dataset=="Kamath")
+obj_zena <- subset(obj2, subset = dataset=="Zena")
+
+dp <- DotPlot(obj_kamath, features= key_marks %>%
+                dplyr::filter(final_names=="CD83_BCAS2", p_val_adj <= .05, pct.1-pct.2>=.4) %>% arrange(desc(pct.1-pct.2)) %>% dplyr::pull(gene),
+              cols = c("blue","lightgrey", "firebrick1"))+
+  scale_color_gradient2(low="blue", mid="lightgrey",high="firebrick1")+
+  coord_flip()
+png("CD83_BCAS2_markers_0.3_kamath_data.png", height=5,width=8,units="in", res=900)
+print(dp)
+dev.off()
+
+dp <- DotPlot(obj_zena, features= key_marks %>%
+                dplyr::filter(final_names=="CD83_BCAS2", p_val_adj <= .05, pct.1-pct.2>=.4) %>% arrange(desc(pct.1-pct.2)) %>% dplyr::pull(gene),
+              cols = c("blue","lightgrey", "firebrick1"))+
+  scale_color_gradient2(low="blue", mid="lightgrey",high="firebrick1")+
+  coord_flip()
+png("CD83_BCAS2_markers_0.3_zena_data.png", height=5,width=8,units="in", res=900)
+print(dp)
+dev.off()
+```
+
+# Calculate Kamath CD83_BCAS2 Proportions
+## Load meta data
+```{r}
+data_file <- "kamath.tsv.gz"
+if (file.exists(data_file)) {
+  meta <- vroom::vroom(data_file)
+} else {
+  kamath <- readRDS("initial_merged_objects_v2.rds")
+  vroom::vroom_write(kamath@meta.data, data_file)
+}
+```
+
+## Compute props
+```{r}
+props_kamath <- meta %>%
+  group_by(donor_id) %>%
+  filter(dataset == "Kamath") %>%
+  filter(n() > 100) %>%
+  ungroup() %>%
+  mutate(across(matches("integrated_snn_res.0.|donor_id"), as.character)) %>%
+  mutate(integrated_snn_res.0.3 = paste0("cluster_", integrated_snn_res.0.3)) %>%
+  mutate(donor_id = paste0("donor_", donor_id)) %>%
+  dplyr::select(all_of(c("integrated_snn_res.0.3", "Disease",
+                         "Sex", "Donor_Age", "donor_id"))) %>%
+  get_props("donor_id", "integrated_snn_res.0.3") %>%
+  mutate(Disease = as.factor(Disease),
+         Disease = factor(Disease, levels = c("NPC", "PD")),
+         Sex = as.factor(Sex),
+         Sex = factor(Sex, levels = c("M", "F")))
+glimpse(props_kamath)
+
+stopifnot(nrow(props_kamath) == 196 & ncol(props_kamath) == 7)
+
+props_kamath %>%
+  mutate(across(all_of(c("donor_id", "Disease", "Sex")), as.factor),
+         across(starts_with("integrated.RNA_snn_res.0."), as.factor)) %>%
+  datatable()
+
+# Define cell types
+cell_types <- unique(props_kamath$integrated_snn_res.0.3)
+cell_types <- structure(cell_types, names = cell_types)
+
+```
+
+## Prop analysis for Kamath
+• Cluster 7 carries the CD83_BCAS2 signature
+```{r}
+# SN comparison: robust GLM of SN
+comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ Disease + Donor_Age + Sex,
+                       subset(props_kamath, integrated_snn_res.0.3 == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = F)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  datatable()
+```

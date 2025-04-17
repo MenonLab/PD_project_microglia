@@ -1,0 +1,628 @@
+---
+title: "Define Microglial Taxonomy"
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+<style>
+.vscroll-plot {
+    width: 2000px;
+    height: 2000px;
+    overflow-y: scroll;
+    overflow-x: hidden;
+}
+</style>
+
+# Description
+The purpose of this notebook is to establish the microglial taxonomy within our PD single nucleus dataset. The microglial nuclei here have been integrated using Harmony, and have been filtered to exclude low quality nuclei as well as non microglial cells. Defining a microglial taxonomy from PD and NPC samples will allow us to later explore whether any microglial populations are associated with Parkinson's disease, and how microglial gene expression programs change in disease.  
+
+# Set up
+#### Load packages and set seed
+```{r warning = F, message = F}
+set.seed(123)
+library(tictoc)
+library(Matrix)
+library(ggplot2)
+library(cowplot)
+library(ggpubr)
+library(DT)
+library(tibble)
+library(magrittr)
+library(purrr)
+library(dplyr)
+library(Seurat)
+library(clustree)
+```
+
+#### General options
+```{r warning = F, message = F}
+options(DT.options = list(
+  pageLength = 10, language = list(search = 'Filter:'), extensions = 'Buttons',
+  filter = 'top', buttons = 'csv', autoWidth = T, scrollX = T, scrollY = T
+  ))
+
+Subset <- SeuratObject:::subset.Seurat
+```
+
+# Read in master seurat object
+```{r}
+micro <- readRDS("micro_integrated_and_QCed.rda")
+stopifnot(ncol(micro) == 68559 & nrow(micro) == 22177)
+glimpse(micro@meta.data)
+```
+
+# Reclustering after removing low-quality and contaminating nuclei
+## Clustering pipeline
+Check effects of technical covariates
+<div class="vscroll-plot">
+```{r message = F}
+# Re run seurat's pipeline
+micro <- NormalizeData(micro, assay = "RNA") %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA()
+
+DimPlot(micro, reduction = "pca", label = "TRUE")
+FeaturePlot(micro, reduction = "pca", features = "nCount_RNA")
+FeaturePlot(micro, reduction = "pca", features = "nFeature_RNA")
+ElbowPlot(micro, ndims = 30)
+max_pc_n <- 20
+```
+</div>
+
+Clustering
+<div class="vscroll-plot">
+```{r message = F}
+if (any(grepl("RNA_snn_res.0.", colnames(micro@meta.data)))) {
+  # Delete old clustering solutions
+  micro@meta.data %<>%
+  select(-all_of(starts_with("RNA_snn_res")))
+  
+  # New clustering
+  micro <- FindNeighbors(micro, dims = 1:max_pc_n, reduction = "integrated.harmony") %>%
+  FindClusters(resolution = seq(.1, .7, .1)) %>%
+  RunUMAP(reduction = "integrated.harmony", dims = 1:max_pc_n)
+  
+  # Cache clustering results
+  write.csv(micro@meta.data[, grepl("RNA_snn_res.0.",
+                                    colnames(micro@meta.data))],
+            "clusters_at_many_resolutions.csv")
+} else {
+  micro@meta.data %<>%
+    cbind(read.csv("clusters_at_many_resolutions.csv"))
+}
+```
+</div>
+
+Marker genes
+<div class="vscroll-plot">
+```{r message = F, fig.height=60, fig.width=20}
+resolutions <- grep("RNA_snn_res.0.", colnames(micro@meta.data), value = T)
+data_file <- "marker_genes_at_many_resolutions.csv"
+if (!file.exists(data_file)) {
+  marker_genes_res <- vector("list", length(resolutions))
+  for (res in resolutions) {
+    Idents(micro) <- res
+    marker_genes <- FindAllMarkers(micro, test.use = "wilcox", only.pos = T,
+                                   min.pct = 0.25, logfc.threshold = 0.5)
+    marker_genes_res[[res]] <- marker_genes
+  }
+  
+  marker_genes_res %<>%
+    list_rbind(names_to = "res") %>%
+    remove_rownames()
+  write.csv(marker_genes_res, data_file)
+} else {
+  marker_genes_res <- read.csv(data_file)
+}
+
+for (res in resolutions) {
+  # Select genes to plot
+  marker_genes_top <- marker_genes_res %>%
+    filter(res == !!res) %>%
+    group_by(cluster) %>%
+    slice_max(avg_log2FC, n = 10) %>%
+    pull(gene) %>%
+    unique()
+  marker_genes_middle <- marker_genes_res %>%
+    filter(res == !!res) %>%
+    group_by(cluster) %>%
+    filter(avg_log2FC > 1.5,
+           avg_log2FC >= quantile(avg_log2FC, probs = .5)) %>%
+    slice_min(avg_log2FC, n = 10) %>%
+    pull(gene) %>%
+    unique()
+  marker_genes_unique <- marker_genes_res %>%
+    filter(res == !!res, avg_log2FC > 1.5) %>%
+    group_by(gene) %>%
+    filter(n() == 1) %>%
+    pull(gene)
+
+  p <- ggarrange(
+    DotPlot(micro, features = marker_genes_top) +
+      coord_flip() +
+      scale_y_discrete(position = "right") +
+      theme(axis.title = element_blank()),
+    DotPlot(micro, features = marker_genes_middle) +
+      coord_flip() +
+      scale_y_discrete(position = "right") +
+      theme(axis.title = element_blank()),
+    DotPlot(micro, features = marker_genes_unique) +
+      coord_flip() +
+      scale_y_discrete(position = "right") +
+      theme(axis.title = element_blank()),
+    ncol = 3, common.legend = T, legend = "top",
+    labels = c("top markers", "bottom markers", "unique markers")
+  )
+  print(
+    annotate_figure(p, top = text_grob(paste("wilcox at", res), size = 16))
+  )
+}
+```
+</div>
+
+
+# Compare cluster resolutions
+## Visualize clustering tree
+```{r fig.height = 8, fig.width = 9}
+clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+         prop_filter = 0.05) +
+  theme(legend.position = "right")
+```
+
+## How does gene expression change over cluster resolutions?
+
+Visualizing how gene expression changes along the cluster tree can inform us about cluster phenotypes. For example:
+
+### What cluster lineage has the homeostatic microglia?
+<div class="vscroll-plot">
+```{r}
+for (i in c("P2RY12", "CX3CR1")) {
+  print(clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+                 node_colour = i, node_colour_aggr = "median") +
+          theme(legend.box = "horizontal"))
+}
+```
+</div>
+
+### Where in the clustering tree do monocytes and macrophages segregate?
+<div class="vscroll-plot">
+```{r}
+# Literature marker genes
+for (i in c("VCAN", "LYZ", "CD68", "CCR2")) {
+  print(clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+                 node_colour = i, node_colour_aggr = "max") +
+          theme(legend.position = "bottom", legend.box = "horizontal"))
+}
+
+# Observed marker genes for cluster 7 vs 15 in res 0.5
+Idents(micro) <- micro$RNA_snn_res.0.5
+res5_7_15.markers <- FindMarkers(micro, ident.1 = "7", ident.2 = "15",
+                                  test = "roc", min.pct = 0.25)
+res5_7_15.markers %>%
+  arrange(myAUC) %>%
+  slice(1:5)
+
+for (i in c("RIPOR2", "XYLT1", "SLC8A1", "UTRN")) {
+  print(clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+                 node_colour = i, node_colour_aggr = "max") +
+          theme(legend.position = "bottom", legend.box = "horizontal"))
+}
+```
+</div>
+
+# Compare markers for clusters that are candidates for merging or splitting
+
+Using the cluster lineages defined by clustree, we can leverage two approaches for establishing our microglial taxonomy:
+1) A bottom up approach: starting from a lower resolution and splitting biologically meaningful clusters.
+2) A top down approach: starting from a higher resolution and merging clusters that are not meaningfully different from each other. 
+We can explore the unique marker genes for clusters along the same cluster lineages in clustree to determine whether they should be split/merged (depending on the starting approach).
+
+Let's identify and plot the unique markers between clusters that are candidates for splitting/merging. 
+
+## Bottom up - candidates for splitting in Res 3
+### Resolution 4: clusters 6 and 8
+<div class="vscroll-plot">
+```{r}
+Idents(micro) <- micro$RNA_snn_res.0.4
+res4_6_8.markers <- FindMarkers(micro, ident.1 = "6", ident.2 = "8",
+                                test = "wilcox", min.pct = 0.25)
+topn <- 10
+datatable(res4_6_8.markers)
+unique_markers <- c(
+  res4_6_8.markers %>%
+    arrange(desc(avg_log2FC)) %>%
+    slice(1:topn) %>%
+    rownames(),
+  res4_6_8.markers %>%
+    arrange(avg_log2FC) %>%
+    slice(1:topn) %>%
+    rownames()
+)
+for (i in unique_markers) {
+  print(clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+                 node_colour = i, node_colour_aggr = "median") +
+          theme(legend.position = "bottom", legend.box = "horizontal"))
+}
+```
+</div>
+
+To ensure that clustree heatmaps are not diminishing expression at this specific resolution, let's plot the markers at the resolution we are directly comparing them at
+```{r}
+DotPlot(micro, features = unique_markers) +
+  RotatedAxis()  +
+  theme(legend.box = "vertical")
+```
+
+At resolution 4, clusters 6 and 8, 6 appears to have markers that are unique compared to 8, but 8 does not appear to have markers that are unique compared to 6. I propose that in our taxonomy, these clusters will not be represented as two unique populations.
+
+### Resolution 4: clusters 0 and 12
+<div class="vscroll-plot">
+```{r}
+res4_0_12.markers <- FindMarkers(micro, ident.1 = "0", ident.2 = "12",
+                                 test = "wilcox", min.pct = 0.25)
+
+topn <- 10
+datatable(res4_0_12.markers)
+unique_markers <- c(
+  res4_0_12.markers %>%
+    arrange(desc(avg_log2FC)) %>%
+    slice(1:topn) %>%
+    rownames(),
+  res4_0_12.markers %>%
+    arrange(avg_log2FC) %>%
+    slice(1:topn) %>%
+    rownames()
+)
+for (i in unique_markers) {
+  print(clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+                 node_colour = i, node_colour_aggr = "median") +
+          theme(legend.position = "bottom", legend.box = "horizontal"))
+}
+```
+</div>
+
+Markers at the resolution we are directly comparing them at
+```{r}
+DotPlot(micro, features = unique_markers) +
+  RotatedAxis()  +
+  theme(legend.box = "vertical")
+```
+
+At resolution 4, clusters 0 and 12, 0 appears to have markers that are unique compared to 12, and 12 appears to have markers that are unique compared to 0. Their lineage on clustree is very clean. I propose that in our taxonomy, these clusters will be represented as two unique populations.Markers unique to cluster 12 include PTPRG, SLC7A1, GLDN, CD83, IL1B, OLR1, MYO1E, BCL2A1, ALD1H2, FLT1, TPRG1
+
+### Resolution 5: clusters 7 and 15
+<div class="vscroll-plot">
+```{r}
+Idents(micro) <- micro$RNA_snn_res.0.5
+res5_7_15.markers <- FindMarkers(micro, ident.1 = "7", ident.2 = "15",
+                                test = "wilcox", min.pct = 0.25)
+topn <- 10
+datatable(res5_7_15.markers)
+unique_markers <- c(
+  res5_7_15.markers %>%
+    arrange(desc(avg_log2FC)) %>%
+    slice(1:topn) %>%
+    rownames(),
+  res5_7_15.markers %>%
+    arrange(avg_log2FC) %>%
+    slice(1:topn) %>%
+    rownames()
+)
+for (i in unique_markers) {
+  print(clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+                 node_colour = i, node_colour_aggr = "median") +
+          theme(legend.position = "bottom", legend.box = "horizontal"))
+}
+```
+</div>
+
+Markers at the resolution we are directly comparing them at
+```{r}
+DotPlot(micro, features = unique_markers) +
+  RotatedAxis() +
+  theme(legend.box = "horizontal")
+```
+
+At resolution 5, clusters 7 and 15, 7 appears to have markers that are unique compared to 15, and 15 has markers that are unique compared to 7. Cluster 7 clearly expresses PVM markers, and cluster 15 expresses monocyte markers I propose that in our taxonomy, these clusters will represented as two unique populations.
+
+## Top Down - candidates for merging in Res 5
+### Resolution 5: clusters 1 and 4
+<div class="vscroll-plot">
+```{r}
+Idents(micro) <- micro$RNA_snn_res.0.5
+res5_1_4.markers <- FindMarkers(micro, ident.1 = "1", ident.2 = "4",
+                                test = "wilcox", min.pct = 0.25)
+topn <- 10
+datatable(res5_1_4.markers)
+unique_markers <- c(
+  res5_1_4.markers %>%
+    arrange(desc(avg_log2FC)) %>%
+    slice(1:topn) %>%
+    rownames(),
+  res5_1_4.markers %>%
+    arrange(avg_log2FC) %>%
+    slice(1:topn) %>%
+    rownames()
+)
+for (i in unique_markers) {
+  print(clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+                 node_colour = i, node_colour_aggr = "median") +
+          theme(legend.position = "bottom", legend.box = "horizontal"))
+}
+```
+</div>
+
+Markers at the resolution we are directly comparing them at
+```{r}
+DotPlot(micro, features = unique_markers) +
+  RotatedAxis() +
+  theme(legend.box = "vertical")
+```
+
+At resolution 5, clusters 1 and 4, 1 appears to have markers that are unique compared to 4, but 4 does not have markers that are unique compared to 1. I propose that in our taxonomy, these clusters will not be represented as two unique populations.
+
+### Resolution 5: clusters 6 and 9
+<div class="vscroll-plot">
+```{r}
+res5_6_9.markers <- FindMarkers(micro, ident.1 = "6", ident.2 = "9",
+                                  test = "wilcox", min.pct = 0.25)
+
+topn <- 10
+datatable(res5_6_9.markers)
+unique_markers <- c(
+  res5_6_9.markers %>%
+    arrange(desc(avg_log2FC)) %>%
+    slice(1:topn) %>%
+    rownames(),
+  res5_6_9.markers %>%
+    arrange(avg_log2FC) %>%
+    slice(1:topn) %>%
+    rownames()
+)
+for (i in unique_markers) {
+  print(clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+                 node_colour = i, node_colour_aggr = "median") +
+          theme(legend.position = "bottom", legend.box = "horizontal"))
+}
+```
+</div>
+
+Markers at the resolution we are directly comparing them at
+```{r}
+DotPlot(micro, features = unique_markers) +
+  RotatedAxis() +
+  theme(legend.box = "vertical")
+```
+
+At resolution 5, clusters 6 and 9, 6 appears to have markers that are unique compared to 9, but 9 does not have markers that are unique compared to 6. I propose that in our taxonomy, these clusters will not be represented as two unique populations.
+
+### Resolution 5: clusters 10 and 11
+<div class="vscroll-plot">
+```{r}
+res5_10_11.markers <- FindMarkers(micro, ident.1 = "10", ident.2 = "11",
+                                  test = "wilcox", min.pct = 0.25)
+
+topn <- 10
+datatable(res5_10_11.markers)
+unique_markers <- c(
+  res5_10_11.markers %>%
+    arrange(desc(avg_log2FC)) %>%
+    slice(1:topn) %>%
+    rownames(),
+  res5_10_11.markers %>%
+    arrange(avg_log2FC) %>%
+    slice(1:topn) %>%
+    rownames()
+)
+for (i in unique_markers) {
+  print(clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+                 node_colour = i, node_colour_aggr = "median") +
+          theme(legend.position = "bottom", legend.box = "horizontal"))
+}
+```
+</div>
+
+Markers at the resolution we are directly comparing them at
+```{r}
+DotPlot(micro, features = unique_markers) +
+  RotatedAxis() +
+  theme(legend.box = "vertical")
+```
+
+At resolution 5, clusters 10 and 11, 10 appears to have few markers that are unique compared to 11, but otherwise their top distinguishing markers are highly expressed by both clusters. I propose that in our taxonomy, these clusters will not be represented as two unique populations.
+
+### Resolution 3: clusters 2 and 3
+<div class="vscroll-plot">
+```{r}
+Idents(micro) <- micro$RNA_snn_res.0.5
+res3_2_3.markers <- FindMarkers(micro, ident.1 = "2", ident.2 = "3",
+                                test = "wilcox", min.pct = 0.25)
+topn <- 10
+datatable(res3_2_3.markers)
+unique_markers <- c(
+  res3_2_3.markers %>%
+    arrange(desc(avg_log2FC)) %>%
+    slice(1:topn) %>%
+    rownames(),
+  res3_2_3.markers %>%
+    arrange(avg_log2FC) %>%
+    slice(1:topn) %>%
+    rownames()
+)
+for (i in unique_markers) {
+  print(clustree(micro, prefix = "RNA_snn_res.0.", layout = "sugiyama",
+                 node_colour = i, node_colour_aggr = "median") +
+          theme(legend.position = "bottom", legend.box = "horizontal"))
+}
+```
+</div>
+
+```{r}
+DotPlot(micro, features = unique_markers) +
+  RotatedAxis() +
+  theme(legend.box = "vertical")
+```
+
+```{r}
+table(micro@meta.data$RNA_snn_res.0.3, micro@meta.data$RNA_snn_res.0.2)
+table(micro@meta.data$RNA_snn_res.0.3, micro@meta.data$RNA_snn_res.0.1)
+```
+
+While at resolution 3, clusters 2 and 3 have unique markers compared to each other, they do not appear to have a unique cluster identity compared to other clusters, as demonstrated by the dotplots of differential genes above LFC 1, 1.5, and 2 using wilcox and logistic regression plotted above. For cluster 2, there appear to be two unique genes, INPP4B and GCLC. Cluster 3 has more unique markers, including FOSL2, CD55, SPTLC3, and THEMIS2. However, these few markers do not warrent them to be unique populations in the dataset. These genes appear to be more highly expressed in these two clusters, but some of them are expressed across other clusters as well. As clustree shows that these clusters originated from one parent cluster, we will combine them into.
+
+### Resolution 3: clusters 1, 4 and 6
+Clusters 1 4 and 6 come from the same parent cluster, as visualized in clustree. Cluster 1 does not appear to have a unique signature, with no markers that appear unique compared to 4 and 6. However, both clusters 4 and 6 appear to have unique signatures from all other microglia in the dataset, suggesting that they should be unique clusters. For this reason, we have opted to keep clusters 1, 4, and 6 separate as suggested by resolution 0.3. 
+Cluster 4 expresses several ribosomal protein markers, as well as inflammatory response markers including TYROBP and CD81
+Cluster 6 expresses FGL1, CECR2, APBA2, PLCXD3
+
+# Defining microglial taxonomy using bottom-up semi-automated clustering
+
+Based on Clustree findings and ROC marker comparisons between clusters that diverge in clustree, we have decided to proceed with bottom up semi-automated clustering.
+Beginning with resolution 3 we will: 
+1) Split Resolution 3 cluster 0 into Resolution 4 clusters 0 and 12
+2) Split Resolution 3 cluster 7 into Resolution 5 clusters 7 and 15 to isolate monocytes from PVMs.
+
+## Assign final cluster identities
+```{r}
+micro@meta.data %<>%
+  mutate(
+    final_clusters = case_when(
+      RNA_snn_res.0.3 == 0 & RNA_snn_res.0.4 == 12 ~ "12",
+      RNA_snn_res.0.3 == 7 & RNA_snn_res.0.5 == 15 ~ "15",
+      RNA_snn_res.0.3 %in% c(2, 3) ~ "23",
+      TRUE ~ as.character(RNA_snn_res.0.3)
+      )
+    )
+Idents(micro) <- micro@meta.data$final_clusters
+```
+
+Check whether new cluster identities are correctly assigned
+```{r}
+table(micro@meta.data$final_clusters, micro@meta.data$RNA_snn_res.0.3)
+```
+
+## Differential expression analysis across final clusters
+```{r message = FALSE, fig.height=35, fig.width=10}
+data_file <- "micro_final_markers_wilcox.csv"
+if (!file.exists(data_file)) {
+  marker_genes  <- FindAllMarkers(micro, test.use = "wilcox", only.pos = T,
+                                  min.pct = 0.25, logfc.threshold = 0.5)
+  write.csv(marker_genes, data_file, row.names = F)
+} else {
+  marker_genes <- read.csv(data_file)
+}
+
+marker_genes_unique <- marker_genes %>%
+    filter(avg_log2FC > 1) %>%
+    group_by(gene) %>%
+    filter(n() == 1) %>%
+    pull(gene)
+
+DotPlot(micro, features = marker_genes_top) +
+  coord_flip() +
+  scale_y_discrete(position = "right") +
+  theme(axis.title = element_blank(),
+        panel.grid.major = element_line(linewidth = 0.095, color = "grey65"))
+```
+
+##What are the top 10 marker genes per cluster ranked by avg_log2FC?
+```{r}
+marker_genes %>%
+  group_by(cluster) %>%
+  slice_max(avg_log2FC, n = 20) %>%
+  select(cluster, gene, avg_log2FC) %>%
+  datatable()
+```
+
+What are the top 10 genes per cluster that maximize avg_log2FC and pct.1 while minimizing pct.2? 
+```{r}
+marker_genes %>%
+  group_by(cluster) %>%
+  filter(!duplicated(paste0(pmax(avg_log2FC, pct.1),
+                            pmin(avg_log2FC, pct.2)))) %>%
+  slice(1:15) %>%
+  datatable()
+```
+
+## Relabel clusters
+```{r}
+# Update metadata of cluster names
+micro@meta.data %<>%
+ mutate(final_names = case_when(
+   final_clusters == "0" ~ "TMEM163_HAMP",
+   final_clusters == "1" ~ "NAALADL2",
+   final_clusters == "12" ~ "PTPRG_GLDN",
+   final_clusters == "23" ~ "ZBTB16_NHSL1",
+   final_clusters == "4" ~ "RPS11_FTL",
+   final_clusters == "5" ~ "NPAS3_DLG2",
+   final_clusters == "6" ~ "P2RY12_CX3CR1",
+   final_clusters == "7" ~ "PVM",
+   final_clusters == "8" ~ "BAG3_CHORDC1",
+   final_clusters == "9" ~ "CD83_BCAS2",
+   final_clusters == "10" ~ "MKI67",
+   final_clusters == "15" ~ "Mono",
+   TRUE ~ final_clusters
+ ))
+
+# Update cluster names in exported table
+data_file <- "micro_final_markers_wilcox.csv"
+micro_final_markers_wilcox <- read.csv(data_file) %>%
+  left_join(micro@meta.data %>%
+              select(final_clusters, final_names) %>%
+              distinct(),
+            by = c("cluster" = "final_clusters"))
+write.csv(marker_genes, data_file, row.names = F)
+write.csv(micro_final_markers_wilcox, "micro_final_markers_wilcox_names.csv")
+```
+
+Plot Top Markers For Each Cluster
+```{r}
+micro@meta.data <- micro@meta.data %>%
+  mutate(final_names = factor(final_names, levels = c(
+    "ZBTB16_NHSL1", "TMEM163_HAMP", "NAALADL2", "RPS11_FLT", "NPAS3_DLG2",
+    "P2RY12_CX3CR1", "PVM","BAG3_CHORDC1", "CD83_BCAS2", "PTPRG_GLDN", "MKI67", "Mono"
+    )))
+Idents(micro) <- micro$final_names
+# DotPlot with top genes
+DotPlot(micro, features = c(
+  "TMEM163", "LIMK2", "ERC2", "HAMP", "NAALADL2", "P2RY12", "A2M", "KIF26B",
+  "ZBTB16", "NHSL1", "LRRK2", "AIF1", "FTL", "APOE", "RPS11", "NPAS3", "DLG2",
+  "CX3CR1", "MRC1", "CD163", "BAG3", "CHORDC1", "CD83", "BCAS2", "GPR183",
+  "GLDN", "PTPRG", "SLC7A1", "OLR1", "MYO1E", "MKI67", "VCAN", "ITGA4"
+  )) + RotatedAxis()
+```
+Highly expressed genes for these clusters include:
+TMEM163_HAMP: TMEM163, HAMP, LIMK2, SPP1, ERC2
+PTPRG_GLDN: CD83, OLR1, SPP1, EGR1, IPCEF1, GLDN, PTPRG, SLC7A1, MYO1E
+NAALADL2: NAALADL2, P2RY12, A2M, KIF26B *markers not unique to this cluster
+ZBTB16_NHSL1: NHSL1, ZBTB16, LRRK2 *markers not unique to this cluster
+RPS11_FLT: ribosomal gens, FLT, AIF1, APOE, TYROBP, EEF1A1, TMSB10, TPT1 
+NPAS3_DLG2: NPAS3, DLG2
+P2RY12_CX3CR1: P2RY12, CX3CR1, CECR2
+PVM: CD163, MRC1, LYVE1
+MONOS: VCAN, ITGA4
+BAG3_CHORDC1: HSPs. CHORDC1, MRPS6, SLC5A3, HIBCH, BAG3
+CD83_BCAS2: CD83, HSPs, HIF1A, SLC2A3, RGS1, BCAS2, GPR183
+MKI67: proliferative
+
+# Save
+```{r}
+if (!file.exists("micro_defined_taxonomy.rda")) {
+    saveRDS(micro, "micro_defined_taxonomy.rda")
+}
+```
+
+# Sessioninfo
+```{r}
+sessionInfo()
+```
+
+
+
+
+

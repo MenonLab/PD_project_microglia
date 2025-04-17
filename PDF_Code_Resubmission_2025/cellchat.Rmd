@@ -1,0 +1,543 @@
+---
+title: "Microglia - Neuron Cell Chat in Substantia Nigra"
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+Purpose: The purpose of this notebook is to investigate inferred intercellular interactions between dopaminergic neuron and microglial populations in substnatia nigra (SN) tissue from Parkinson's disease (PD) and non-Parkinson's control (NPC) samples in our dataset. First, we integrate the microglial and neuronal objects into one seurat object which we convert into two cell chat objects - one including all PD SN samples and the other including all NPC SN samples. We then run the cell-chat pipeline for the PD and NPC samples. Lastly, we compare differences between the PD and NPC inferred interactions using the cell-chat pipeline to identify pathways that are significantly altered in disease. 
+
+# Set up
+## Load packages
+```{r}
+set.seed(0)
+library(DT)
+library(knitr)
+library(presto)
+library(Matrix)
+library(patchwork)
+library(ggplot2)
+library(cowplot)
+library(Seurat)
+library(dplyr)
+library(CellChat)
+library(patchwork)
+```
+
+# Load in Microglia and Neuron Data
+```{r}
+micro <- readRDS("micro_defined_taxonomy.rda")
+neurons <- readRDS("da_neurons.rda")
+
+Subset <- SeuratObject:::subset.Seurat
+```
+
+
+# Filter DA neurons from SN and rename as pooled "neuron" label
+```{r}
+neurons@meta.data <- neurons@meta.data %>%
+  mutate(
+    across(starts_with("RNA_snn_res.0."), as.character),
+    RNA_snn_res.0.2 = paste0("cluster_", RNA_snn_res.0.2),
+    final_names = "Neurons"
+      )
+
+neurons_sn <- neurons %>%
+  subset(Region == "SN") %>%
+  droplevels()
+```
+
+# Select Microglia SN nuclei
+```{r}
+micro_sn <- micro %>%
+  subset(Region == "SN") %>%
+  droplevels()
+```
+
+# Merge neuron and microglial layers and create merged seurat object
+```{r}
+merged_micro_neruons <- merge(micro_sn, y = neurons_sn)
+meta_merged <- merged_micro_neruons@meta.data
+unique(meta_merged$final_names)
+
+counts_micro_sn <- JoinLayers(micro_sn)[["RNA"]]$counts
+counts_neurons_sn <- JoinLayers(neurons_sn)[["RNA"]]$counts
+counts_merged <- cbind(counts_micro_sn, counts_neurons_sn)
+
+merge_micro_neurons_layers <- CreateSeuratObject(counts_merged, meta.data = meta_merged)
+
+rm(counts_micro_sn, counts_neurons_sn, counts_merged, merged_micro_neruons, meta_merged)
+```
+
+#seurat pipeline for TH neurons
+```{r}
+merge_micro_neurons_layers <- NormalizeData(merge_micro_neurons_layers, assay = "RNA") %>%
+  FindVariableFeatures() %>%
+  ScaleData() %>%
+  RunPCA()
+
+merge_micro_neurons_layers <- FindNeighbors(merge_micro_neurons_layers, dims = 1:15) %>%
+  FindClusters(resolution = 0.3, verbose = F) %>%
+  RunUMAP(dims = 1:10)
+
+merge_micro_neurons_layers@meta.data <- merge_micro_neurons_layers@meta.data %>%
+  rename(samples = "sample_ID") %>%
+  mutate(samples = as.factor(samples))
+
+```
+
+#Subset PD and NPC groups
+```{r}
+merge_micro_neurons_layers <- merge_micro_neurons_layers %>%
+  subset(final_names != "BAG3_CHORDC1") #%>%
+  #subset(final_names != "cluster_10")
+
+micro_neurons_sn_pd <- merge_micro_neurons_layers %>%
+  subset(Disease == "PD") %>%
+  droplevels()
+glimpse(micro_neurons_sn_pd@meta.data)
+
+micro_neurons_sn_npc <- merge_micro_neurons_layers %>%
+  subset(Disease == "NPC") %>%
+  droplevels()
+glimpse(micro_neurons_sn_npc@meta.data)
+
+```
+
+# Cell chat NPCs
+## Create cell chat object with microglia and DA neurons, NPCs
+```{r}
+cellchat <- createCellChat(object = micro_neurons_sn_npc, group.by = "final_names", assay = "RNA")
+cellchat
+```
+
+```{r}
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+cellchat@DB <- CellChatDB
+```
+
+```{r}
+# subset the expression data of signaling genes for saving computation cost
+cellchat <- subsetData(cellchat) 
+
+future::plan("multisession", workers = 4) # do parallel
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+```
+
+```{r}
+options(future.globals.maxSize = 8000 * 1024^2)
+cellchat <- computeCommunProb(cellchat, type = "triMean")
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+```
+
+
+```{r}
+df.net <- subsetCommunication(cellchat, sources.use = c("Neurons"), targets.use = c("CD83_BCAS2"))
+df.net
+write.csv(df.net, "NeuronstoM8CellChatNPCs.csv")
+
+df.net <- subsetCommunication(cellchat)
+write.csv(df.net, "CellChatNPC.csv")
+```
+
+```{r}
+df.net <- subsetCommunication(cellchat, sources.use = c("CD83_BCAS2"), targets.use = c("Neurons"))
+df.net
+write.csv(df.net, "M8toNeuronsNPCs.csv")
+
+df.net <- subsetCommunication(cellchat, sources.use = c("NAALADL2"), targets.use = c("Neurons"))
+df.net
+
+df.net <- subsetCommunication(cellchat, sources.use = c("Neurons"), targets.use = c("P2RY12_CX3CR1"))
+df.net
+```
+
+```{r}
+cellchat <- computeCommunProbPathway(cellchat)
+cellchat <- aggregateNet(cellchat)
+```
+
+```{r}
+groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd = TRUE)
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge = F, title.name = "Number of interactions")
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge = F, title.name = "Interaction weights/strength")
+```
+
+```{r}
+pathways.show <- c("ADGRL") 
+# Hierarchy plot
+# Here we define `vertex.receive` so that the left portion of the hierarchy plot shows signaling to fibroblast and the right portion shows signaling to immune cells 
+vertex.receiver = seq(1,4) # a numeric vector. 
+netVisual_aggregate(cellchat, signaling = pathways.show,  vertex.receiver = vertex.receiver)
+# Circle plot
+par(mfrow=c(1,1))
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "circle")
+```
+
+```{r}
+# Compute the network centrality scores
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP")
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+gg1 <- netAnalysis_signalingRole_scatter(cellchat)
+#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+# Signaling role analysis on the cell-cell communication networks of interest
+#> Signaling role analysis on the cell-cell communication network from user's input
+gg1 
+```
+
+```{r}
+ht1 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing")
+ht2 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming")
+ht1 + ht2
+```
+
+# Cell Chat PD
+## Create cell chat object with microglia and TH neurons, PD
+```{r}
+cellchatpd <- createCellChat(object = micro_neurons_sn_pd, group.by = "final_names", assay = "RNA")
+cellchatpd
+```
+
+```{r}
+CellChatDB <- CellChatDB.human
+showDatabaseCategory(CellChatDB)
+cellchatpd@DB <- CellChatDB
+```
+
+```{r}
+# subset the expression data of signaling genes for saving computation cost
+cellchatpd <- subsetData(cellchatpd) 
+
+future::plan("multisession", workers = 4) # do parallel
+cellchatpd <- identifyOverExpressedGenes(cellchatpd)
+cellchatpd <- identifyOverExpressedInteractions(cellchatpd)
+
+```
+
+```{r}
+options(future.globals.maxSize = 8000 * 1024^2)
+cellchatpd <- computeCommunProb(cellchatpd, type = "triMean")
+cellchatpd <- filterCommunication(cellchatpd, min.cells = 10)
+```
+
+```{r}
+df.net <- subsetCommunication(cellchatpd, sources.use = c("Neurons"), targets.use = c("CD83_BCAS2"))
+df.net
+write.csv(df.net, "NeuronstoM8CellChatPDs.csv")
+
+df.net <- subsetCommunication(cellchatpd)
+write.csv(df.net, "CellChatPD.csv")
+```
+
+
+
+```{r}
+df.net <- subsetCommunication(cellchatpd, sources.use = c("CD83_BCAS2"), targets.use = c("Neurons"))
+df.net
+write.csv(df.net, "M8toNeuronsCellChatPDs.csv")
+
+df.net <- subsetCommunication(cellchatpd, sources.use = c("NAALADL2"), targets.use = c("Neurons"))
+df.net
+
+df.net <- subsetCommunication(cellchatpd, sources.use = c("Neurons"), targets.use = c("P2RY12_CX3CR1"))
+df.net
+```
+
+```{r}
+cellchatpd <- computeCommunProbPathway(cellchatpd)
+cellchatpd <- aggregateNet(cellchatpd)
+```
+
+```{r}
+groupSize <- as.numeric(table(cellchatpd@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchatpd@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellchatpd@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+```
+
+```{r}
+pathways.show <- c("THY1") 
+# Hierarchy plot
+# Here we define `vertex.receive` so that the left portion of the hierarchy plot shows signaling to fibroblast and the right portion shows signaling to immune cells 
+vertex.receiver = seq(1,4) # a numeric vector. 
+netVisual_aggregate(cellchatpd, signaling = pathways.show,  vertex.receiver = vertex.receiver)
+# Circle plot
+par(mfrow=c(1,1))
+netVisual_aggregate(cellchatpd, signaling = pathways.show, layout = "circle")
+
+netAnalysis_contribution(cellchatpd, signaling = pathways.show)
+```
+
+
+```{r}
+# Compute the network centrality scores
+cellchatpd <- netAnalysis_computeCentrality(cellchatpd, slot.name = "netP")
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+gg1 <- netAnalysis_signalingRole_scatter(cellchatpd)
+#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+# Signaling role analysis on the cell-cell communication networks of interest
+#> Signaling role analysis on the cell-cell communication network from user's input
+gg1 
+```
+
+```{r}
+ht1 <- netAnalysis_signalingRole_heatmap(cellchatpd, pattern = "outgoing")
+ht2 <- netAnalysis_signalingRole_heatmap(cellchatpd, pattern = "incoming")
+ht1 + ht2
+```
+
+# Save cell chat objects
+```{r}
+# Objects with individual neuronal clusters were individuall saved as cellchat "cellchat_NPC.rds" cellchatpd = "cellchat_PD.rds"
+#Saving now with grouped neurons
+saveRDS(cellchat, file = "cellchat_NPC_groupedneurons.rds")
+saveRDS(cellchatpd, file = "cellchat_PD_groupedneurons.rds")
+```
+
+```{r}
+cellchat <- readRDS("cellchat_NPC_groupedneurons.rds")
+cellchatpd <- readRDS("cellchat_PD_groupedneurons.rds")
+```
+
+
+# Compare PD and NPCs signlaing pathways using cell-chat comparison pipeline 
+```{r}
+object.list <- list(PD = cellchatpd, NPC = cellchat)
+cellchatcomp <- mergeCellChat(object.list, add.names = names(object.list))
+#> Merge the following slots: 'data.signaling','images','net', 'netP','meta', 'idents', 'var.features' , 'DB', and 'LR'.
+cellchatcomp
+gg1 <- compareInteractions(cellchatcomp, show.legend = F, group = c(1,2))
+gg2 <- compareInteractions(cellchatcomp, show.legend = F, group = c(1,2), measure = "weight")
+gg1 + gg2
+ggsave("num_interactions.png", width = 4, height = 4, units = "in")
+```
+
+
+```{r}
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_diffInteraction(cellchatcomp, weight.scale = T)
+netVisual_diffInteraction(cellchatcomp, weight.scale = T, measure = "weight")
+```
+
+
+```{r}
+gg1 <- netVisual_heatmap(cellchatcomp)
+#> Do heatmap based on a merged object
+gg2 <- netVisual_heatmap(cellchatcomp, measure = "weight")
+#> Do heatmap based on a merged object
+gg1 + gg2
+```
+
+
+```{r}
+weight.max <- getMaxWeight(object.list, attribute = c("idents","count"))
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_circle(object.list[[i]]@net$count, weight.scale = T, label.edge= F, edge.weight.max = weight.max[2], edge.width.max = 12, title.name = paste0("Number of interactions - ", names(object.list)[i]))
+}
+```
+
+
+```{r}
+group.cellType <- c(rep("CD83_BCAS2", 4), rep("P2RY12_CX3CR1", 4), rep("PVM", 4))
+group.cellType <- factor(group.cellType, levels = c("CD83_BCAS2", "P2RY12_CX3CR1", "PVM"))
+object.list <- lapply(object.list, function(x) {mergeInteractions(x, group.cellType)})
+cellchatcomp <- mergeCellChat(object.list, add.names = names(object.list))
+#> Merge the following slots: 'data.signaling','images','net', 'netP','meta', 'idents', 'var.features' , 'DB', and 'LR'.
+```
+
+```{r}
+weight.max <- getMaxWeight(object.list, slot.name = c("idents", "net", "net"), attribute = c("idents","count", "count.merged"))
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_circle(object.list[[i]]@net$count.merged, weight.scale = T, label.edge= T, edge.weight.max = weight.max[3], edge.width.max = 12, title.name = paste0("Number of interactions - ", names(object.list)[i]))
+}
+```
+
+```{r}
+num.link <- sapply(object.list, function(x) {rowSums(x@net$count) + colSums(x@net$count)-diag(x@net$count)})
+weight.MinMax <- c(min(num.link), max(num.link)) # control the dot size in the different datasets
+gg <- list()
+for (i in 1:length(object.list)) {
+  gg[[i]] <- netAnalysis_signalingRole_scatter(object.list[[i]], title = names(object.list)[i], weight.MinMax = weight.MinMax)
+}
+#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+#> Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+patchwork::wrap_plots(plots = gg)
+```
+
+
+```{r}
+gg1 <- netAnalysis_signalingChanges_scatter(cellchatcomp, idents.use = "CD83_BCAS2")
+#> Visualizing differential outgoing and incoming signaling changes from NL to LS
+#> The following `from` values were not present in `x`: 0
+#> The following `from` values were not present in `x`: 0, -1
+gg2 <- netAnalysis_signalingChanges_scatter(cellchatcomp, idents.use = "P2RY12_CX3CR1")
+gg3 <- netAnalysis_signalingChanges_scatter(cellchatcomp, idents.use = "TMEM163_HAMP")
+gg4 <- netAnalysis_signalingChanges_scatter(cellchatcomp, idents.use = "PVM")
+gg5 <- netAnalysis_signalingChanges_scatter(cellchatcomp, idents.use = "Neurons")
+gg6 <- netAnalysis_signalingChanges_scatter(cellchatcomp, idents.use = "RPS11_FLT")
+gg7 <- netAnalysis_signalingChanges_scatter(cellchatcomp, idents.use = "PTPRG_GLDN")
+#> Visualizing differential outgoing and incoming signaling changes from NL to LS
+#> The following `from` values were not present in `x`: 0, 2
+#> The following `from` values were not present in `x`: 0, -1
+gg1
+gg2
+gg3
+gg4
+gg5
+gg6
+gg7
+patchwork::wrap_plots(plots = list(gg1,gg2))
+patchwork::wrap_plots(plots = list(gg3,gg4))
+ggsave("PTPRG_comp.png", width = 4.5, height = 4, units = "in")
+```
+
+
+```{r}
+gg1 <- rankNet(cellchatcomp, mode = "comparison", measure = "weight", sources.use = NULL, targets.use = NULL, stacked = T, do.stat = TRUE)
+gg2 <- rankNet(cellchatcomp, mode = "comparison", measure = "weight", sources.use = NULL, targets.use = NULL, stacked = F, do.stat = TRUE)
+
+gg1 + gg2
+ggsave("rank_net.png", width = 10, height = 5, units = "in")
+```
+
+
+```{r}
+# define a positive dataset, i.e., the dataset with positive fold change against the other dataset
+pos.dataset = "PD"
+# define a char name used for storing the results of differential expression analysis
+features.name = paste0(pos.dataset, ".merged")
+
+# perform differential expression analysis 
+# Of note, compared to CellChat version < v2, CellChat v2 now performs an ultra-fast Wilcoxon test using the presto package, which gives smaller values of logFC. Thus we here set a smaller value of thresh.fc compared to the original one (thresh.fc = 0.1). Users can also provide a vector and dataframe of customized DEGs by modifying the cellchat@var.features$LS.merged and cellchat@var.features$LS.merged.info. 
+
+cellchatcomp <- identifyOverExpressedGenes(cellchatcomp, group.dataset = "datasets", pos.dataset = pos.dataset, features.name = features.name, only.pos = FALSE, thresh.pc = 0.1, thresh.fc = 0.05,thresh.p = 0.05, group.DE.combined = FALSE) 
+#> Use the joint cell labels from the merged CellChat object
+
+# map the results of differential expression analysis onto the inferred cell-cell communications to easily manage/subset the ligand-receptor pairs of interest
+net <- netMappingDEG(cellchatcomp, features.name = features.name, variable.all = TRUE)
+# extract the ligand-receptor pairs with upregulated ligands in LS
+net.up <- subsetCommunication(cellchatcomp, net = net, datasets = "PD",ligand.logFC = 0.05, receptor.logFC = NULL)
+# extract the ligand-receptor pairs with upregulated ligands and upregulated receptors in NL, i.e.,downregulated in LS
+net.down <- subsetCommunication(cellchatcomp, net = net, datasets = "NPC",ligand.logFC = -0.05, receptor.logFC = NULL)
+
+gene.up <- extractGeneSubsetFromPair(net.up, cellchatcomp)
+gene.down <- extractGeneSubsetFromPair(net.down, cellchatcomp)
+```
+
+```{r}
+pairLR.use.up = net.up[, "interaction_name", drop = F]
+gg1 <- netVisual_bubble(cellchatcomp, pairLR.use = pairLR.use.up, sources.use = "CD83_BCAS2", comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Up-regulated signaling in ", names(object.list)[2]))
+#> Comparing communications on a merged object
+pairLR.use.down = net.down[, "interaction_name", drop = F]
+gg2 <- netVisual_bubble(cellchatcomp, pairLR.use = pairLR.use.down, sources.use = "CD83_BCAS2", comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Down-regulated signaling in ", names(object.list)[2]))
+#> Comparing communications on a merged object
+gg1 + gg2
+```
+
+```{r}
+pairLR.use.up = net.up[, "interaction_name", drop = F]
+gg1 <- netVisual_bubble(cellchatcomp, pairLR.use = pairLR.use.up, sources.use = "CD83_BCAS2", targets.use = "Neurons", comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Up-regulated signaling in ", names(object.list)[2]))
+#> Comparing communications on a merged object
+pairLR.use.down = net.down[, "interaction_name", drop = F]
+gg2 <- netVisual_bubble(cellchatcomp, pairLR.use = pairLR.use.down, sources.use = "CD83_BCAS2", targets.use = "Neurons", comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Down-regulated signaling in ", names(object.list)[2]))
+#> Comparing communications on a merged object
+gg1 + gg2
+```
+
+```{r}
+pairLR.use.up = net.up[, "interaction_name", drop = F]
+gg1 <- netVisual_bubble(cellchatcomp, pairLR.use = pairLR.use.up, sources.use = "Neurons", targets.use = "CD83_BCAS2", comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Up-regulated signaling in ", names(object.list)[2]))
+#> Comparing communications on a merged object
+pairLR.use.down = net.down[, "interaction_name", drop = F]
+gg2 <- netVisual_bubble(cellchatcomp, pairLR.use = pairLR.use.down, sources.use = "Neurons", targets.use = "CD83_BCAS2", comparison = c(1, 2),  angle.x = 90, remove.isolate = T,title.name = paste0("Down-regulated signaling in ", names(object.list)[2]))
+#> Comparing communications on a merged object
+gg1 + gg2
+```
+
+
+```{r}
+computeEnrichmentScore(net.down, species = 'human', variable.both = TRUE)
+computeEnrichmentScore(net.up, species = 'human', variable.both = TRUE)
+```
+
+```{r}
+pathways.show <- c("Glutamate") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+
+```
+
+```{r}
+pathways.show <- c("CNTN") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+netAnalysis_contribution(cellchat, signaling = pathways.show)
+```
+
+```{r}
+pathways.show <- c("Netrin") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+```
+
+```{r}
+pathways.show <- c("PROS") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+```
+
+```{r}
+pathways.show <- c("ADGRE") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+netAnalysis_contribution(cellchatpd, signaling = pathways.show)
+```
+
+```{r}
+pathways.show <- c("CADM") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+netAnalysis_contribution(cellchatpd, signaling = pathways.show)
+```
+
+```{r}
+pathways.show <- c("COMPLEMENT") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+```
+
+```{r}
+pathways.show <- c("COMPLEMENT") 
+netAnalysis_contribution(cellchat, signaling = pathways.show)
+netAnalysis_contribution(cellchatpd, signaling = pathways.show)
+```
+

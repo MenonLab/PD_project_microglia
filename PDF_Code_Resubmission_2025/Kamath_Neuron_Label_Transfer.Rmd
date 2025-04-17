@@ -1,0 +1,299 @@
+---
+title: "Kamath Neuron Label Transfer and Proportions"
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+Purpose: The purpose of this notebook is to identify dopaminergic (DA) neurons in our datasat carrying the signatures of substantia nigra dopaminergic neurons charactarized by Kamath et al. (2022). In their work, they propose a DA neuron taxonomy and identify DA neuron populations populations that are vulnerable in Parkinson's disease (PD). Here, we 1) identify their neuronal signatures in our data and 2) investigate whether relative proportions align with findings in Kamath et al.
+
+# Load packages
+```{r message = F}
+options(DT.options = list(
+  pageLength = 10, language = list(search = 'Filter:'), extensions = 'Buttons',
+  filter = 'top', buttons = 'csv', autoWidth = T, scrollX = T, scrollY = T
+  ))
+
+set.seed(0)
+library(DT)
+library(knitr)
+library(Matrix)
+library(patchwork)
+library(ggplot2)
+library(cowplot)
+library(tidyverse)
+library(Seurat)
+library(dplyr)
+# source get_props function for calculating proportions
+devtools::source_gist("a8b1bf03b686a51693bf8db9dd4a8401")
+# source robust_glm function for proportion analysis
+devtools::source_gist("9889b744a23175ff6a252c456f493c2d")
+```
+
+# Prepare Kamath et al DA neurons object
+```{r}
+## Load Kamatha et al metadata and count matrix
+neurons_meta <- read.csv("path_to_data/neurons_meta.csv", row.names = 1)
+meta.dat <- read.csv("path_to_data/Meta_extracted.csv", row.names = 1)
+kamath_counts <- Read10X("path_to_data/RNA_seq/")
+
+# Create Seurat object and integrate metadata
+kamath_obj <- CreateSeuratObject(kamath_counts)
+kamath_obj <- AddMetaData(kamath_obj, metadata = neurons_meta)
+
+# Subset to neurons
+Idents(kamath_obj) <- "major_type"
+neuron_subset <- subset(kamath_obj, idents = "Neurons")
+neuron_subset <- AddMetaData(neuron_subset, metadata = meta.dat)
+
+# Filter human substantia nigra neurons (Ctrl + PD)
+Idents(neuron_subset) <- "species__ontology_label"
+neuron_human <- subset(neuron_subset, idents = "Homo sapiens")
+
+Idents(neuron_human) <- "organ__ontology_label"
+neuron_human_SN <- subset(neuron_human, idents = "substantia nigra pars compacta")
+
+Idents(neuron_human_SN) <- "Status"
+neuron_human_SN_CTRL_PD <- subset(neuron_human_SN, idents = c("Ctrl", "PD"))
+
+# Filter for specific DA neuron subtypes ----
+Idents(neuron_human_SN_CTRL_PD) <- "Cell_Type"
+included_types <- c(
+  "CALB1_CALCR", "CALB1_CRYM_CCDC68", "CALB1_GEM", 
+  "CALB1_PPP1R17", "CALB1_RBP4", "CALB1_TRHR", 
+  "SOX6_AGTR1", "SOX6_DDT", "SOX6_GFRA2", "SOX6_PART1"
+)
+subset_DA <- subset(neuron_human_SN_CTRL_PD, idents = included_types)
+
+# Rename and clean object
+Kamath_obj <- subset_DA
+rm(neuron_subset, neuron_human, neuron_human_SN, neuron_human_SN_CTRL_PD, subset_DA)
+Kamath_obj$region <- Kamath_obj$organ__ontology_label
+Kamath_obj$organ__ontology_label <- NULL
+Kamath_obj$dataset <- "Kamath_etal"
+```
+
+## Integration across donors
+```{r}
+obj.list <- SplitObject(Kamath_obj, split.by = "donor_id")
+rm(Kamath_obj)
+
+obj.list <- lapply(obj.list, function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+  return(x)
+})
+message("Normalization complete.")
+
+# Merge first two objects because theye are too small
+merged_obj <- merge(x = obj.list[[1]], y = obj.list[[2]])
+obj.list <- c(merged_obj, obj.list[-c(1, 2)])
+
+# Integration
+obj.features <- SelectIntegrationFeatures(object.list = obj.list)
+message("Feature selection complete.")
+
+obj.anchors <- FindIntegrationAnchors(object.list = obj.list, anchor.features = obj.features, k.filter = 14)
+message("Anchors identified.")
+
+rm(obj.list)
+
+kamath_integrated_DA_neurons <- IntegrateData(anchorset = obj.anchors, k.weight = 25)
+message("Integration complete.")
+
+# Downstream processing
+kamath_integrated_DA_neurons <- ScaleData(kamath_integrated_DA_neurons, vars.to.regress = "nCount_RNA")
+DefaultAssay(kamath_integrated_DA_neurons) <- "integrated"
+kamath_integrated_DA_neurons <- RunPCA(kamath_integrated_DA_neurons, npcs = 30, verbose = FALSE)
+kamath_integrated_DA_neurons <- RunUMAP(kamath_integrated_DA_neurons, reduction = "pca", dims = 1:22)
+```
+
+# Label transfer to inhouse DA dataset (Chatila et al)
+## Subset DA neurons in Chatila dataset
+```{r}
+# Load external DA neuron dataset
+DA_neurons <- readRDS("path_to_data/DA_round2_includingC0.rds")
+DA_neurons$cluster_name <- DA_neurons$RNA_snn_res.0.2
+
+# Load clinical metadata
+clinical_dat <- read.csv("path_to_data/combined_clinicaldata.csv", row.names = 1)
+
+# Add 'Region' and 'Disease' metadata
+DA_neurons$Region <- sapply(DA_neurons$sample_ID, function(x) clinical_dat$Region[clinical_dat$SeqID == x])
+DA_neurons$Disease <- sapply(DA_neurons$sample_ID, function(x) clinical_dat$Disease[clinical_dat$SeqID == x])
+
+# Create Region-Disease combined column (optional)
+DA_neurons$Region_Disease <- paste(DA_neurons$Region, DA_neurons$Disease, sep = "_")
+
+# Subset to substantia nigra region
+Idents(DA_neurons) <- "Region"
+DA_SN_subset <- subset(DA_neurons, idents = "SN")
+```
+
+## Label transfer
+```{r}
+# Label transfer ----
+reference <- kamath_integrated_DA_neurons
+query <- DA_SN_subset
+
+message("Finding anchors...")
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = query,
+  normalization.method = "LogNormalize",
+  reference.reduction = "pca",
+  dims = 1:15
+)
+
+message("Transferring labels...")
+predictions <- TransferData(
+  anchorset = anchors,
+  refdata = reference$Cell_Type,
+  dims = 1:15
+)
+
+# Add prediction metadata
+DA_SN_subset <- AddMetaData(DA_SN_subset, metadata = predictions)
+
+# Save final labeled query object
+saveRDS(DA_SN_subset, file = "ref_Kamath_labeltransfer_SN_PDDA.rds")
+
+# Print contingency table of predicted vs actual clusters
+table(DA_SN_subset$RNA_snn_res.0.2, DA_SN_subset$predicted.id)
+```
+
+# Calculate Neuron Proportions in Chatila et al. 
+```{r}
+# Load Neuron Data
+neurons <- readRDS("ref_Kamath_labeltransfer_SN_PDDA.rds")
+Subset <- SeuratObject:::subset.Seurat
+```
+
+## Clean meta data
+```{r}
+donor_data <- donor_data %>%
+  mutate(Donor = as.character(Donor))
+
+neurons@meta.data <- neurons@meta.data %>%
+  select(-all_of(c("DonorID", "batch"))) %>%
+  tibble::rownames_to_column("cellid") %>%
+  left_join(clinical_data, by = "sample_ID") %>%
+  mutate(Donor = as.character(Donor)) %>%
+  left_join(donor_data, by = "Donor") %>%
+  rename(batch = "Batch2") %>%
+  select(c("sample_ID", "nCount_RNA", "nFeature_RNA", "Region.y",
+           "Disease.y", "Donor", "batch", "Age", "Sex", "predicted.id",
+           "cellid")) %>%
+  rename(Disease = "Disease.y", Region = "Region.y") %>%
+  tibble::column_to_rownames("cellid")
+
+neurons@meta.data <- neurons@meta.data %>%
+  mutate(Donor = paste0("donor_", Donor),
+         Region = as.factor(Region),
+         Region = factor(Region, c("SN", "VTA", "SI", "HypoTs")),
+         Sex = case_when(grepl("M", Sex) ~ "M", grepl("F", Sex) ~ "F",
+                         TRUE ~ NA_character_),
+         Sex = as.factor(Sex),
+         Sex = relevel(Sex, "M"),
+         batch = as.factor(batch),
+         Disease = as.factor(Disease),
+         Disease = relevel(Disease, "NPC"))
+```
+
+## Save neuron data
+```{r}
+if (!file.exists("da_neurons_kamath_labels.rda")) {
+    saveRDS(neurons, "da_neurons_kamath_labels.rda")
+}
+```
+
+## Calculate props
+```{r}
+data_file <- "~/Desktop/SingleNuc/micro/prop_analysis/kamath_neurons_meta_data.tsv.gz"
+if (file.exists(data_file)) {
+  meta <- vroom::vroom(data_file)
+} else {
+  neurons <- readRDS("~/Desktop/SingleNuc/micro/validation/da_neurons_kamath_labels.rda")
+  vroom::vroom_write(neurons@meta.data, data_file)
+}
+
+# basic stats
+stopifnot(nrow(meta) == 10631)
+stopifnot(ncol(meta) == 10)
+glimpse(meta)
+
+# regions per donor
+table(meta$Donor, meta$Region) %>%
+  as.data.frame() %>%
+  rename(Donor = "Var1", Region = "Var2") %>%
+  datatable()
+
+# cells per donor
+hist(table(meta$Donor))
+
+# cells per donor within each cluster
+#stopifnot(length(unique(meta$final_clusters)) == 16)
+table(meta$Donor, meta$predicted.id) %>%
+  as.data.frame() %>%
+  rename(Donor = "Var1", Cluster = "Var2") %>%
+  datatable()
+```
+```{r}
+props_neurons <- meta %>%
+  group_by(sample_ID) %>%
+  filter(n() > 100) %>%
+  ungroup() %>%
+  mutate(batch = as.character(batch)) %>%
+  dplyr::select(-all_of(c("nCount_RNA", "nFeature_RNA"))) %>%
+  get_props("sample_ID", "predicted.id") %>%
+  mutate(Region = as.factor(Region),
+         Region = factor(Region,
+                         levels = c("SN", "VTA", "SI", "HypoTs")),
+         Disease = as.factor(Disease),
+         Disease = factor(Disease, levels = c("NPC", "PD")),
+         Sex = as.factor(Sex),
+         Sex = factor(Sex, levels = c("M", "F")),
+         ) 
+  # Ensure region-specific clusters are absent from other regions
+  # group_by(RNA_snn_res.0.2, Region) %>%
+  # filter(sum(props) > .01, RNA_snn_res.0.2 == "cluster_10") %>%
+  # group_by(RNA_snn_res.0.2, Region, Disease) %>%
+  # count() %>%
+  # print(n = Inf)
+  
+glimpse(props_neurons)
+
+stopifnot(nrow(props_neurons) == 170 & ncol(props_neurons) == 10)
+
+props_neurons %>%
+  mutate(across(all_of(c("sample_ID", "Donor", "batch")), as.factor)) %>%
+  datatable()
+
+# Define cell types
+cell_types <- unique(props$predicted.id)
+cell_types <- structure(cell_types, names = cell_types)
+```
+
+
+## Check for differential props
+```{r}
+neuron_comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  message(cell_type)
+  output <- robust_glm(prop ~ Disease + Age + Sex + batch,
+                       subset(props, predicted.id == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = F)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+neuron_comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  datatable()
+```

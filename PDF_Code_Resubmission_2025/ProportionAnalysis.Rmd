@@ -1,0 +1,464 @@
+---
+title: "Proportion Analysis for Parkinson's disease and Control Regions"
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+# Description
+The purpose of this notebook is to calculate proportions of microglial subpopulations in each tissue sample, and to investigate whether there are disease associated differences in proportions, across regions.
+
+# Set Up
+## Load packages
+```{r message = F}
+options(DT.options = list(pageLength = 10, extensions = 'Buttons',
+                          buttons = 'csv', autoWidth = T, scrollX = T,
+                          scrollY = T))
+
+set.seed(0)
+library(DT)
+library(knitr)
+library(Matrix)
+library(patchwork)
+library(forcats)
+library(ggplot2)
+library(cowplot)
+library(ggpubr)
+#library(SeuratDisk)
+library(Seurat)
+library(purrr)
+library(tidyr)
+library(dplyr)
+# source get_props function for calculating proportions
+source("./get_props.R")
+# source robust_glm function for proportion analysis
+source("./robust_glm.R")
+# Add column filters to all DT::my_datatable tables
+my_datatable <- function(...) datatable(..., filter = list(position = 'top',
+                                                           clear = F))
+```
+
+# Load and explore data
+```{r message = F}
+data_file <- "micro_define_taxonomy_meta_data.tsv.gz"
+if (file.exists(data_file)) {
+  meta <- vroom::vroom(data_file)
+} else {
+  micro <- readRDS("micro_defined_taxonomy.rda")
+  vroom::vroom_write(micro@meta.data, data_file)
+}
+
+# basic stats
+stopifnot(nrow(meta) == 68559)
+stopifnot(ncol(meta) == 26)
+glimpse(meta)
+
+```
+
+# Compute proportions
+```{r, fig.dim = c(10, 10)}
+# filtering and computing props
+final_names_levels <- c(
+  "ZBTB16_NHSL1", "TMEM163_HAMP", "NAALADL2", "RPS11_FTL", "NPAS3_DLG2",
+  "P2RY12_CX3CR1", "BAG3_CHORDC1", "CD83_BCAS2", "PTPRG_GLDN", "MKI67",
+  "PVM", "Mono"
+)
+
+props <- meta %>%
+  group_by(sample_ID) %>%
+  filter(n() > 100) %>%
+  ungroup() %>%
+  mutate(across(starts_with("RNA_snn_res.0."), as.character),
+         final_clusters = as.character(final_clusters),
+         Donor = as.character(Donor),
+         batch = as.character(batch),
+         NL = as.character(NL)) %>%
+  select(-all_of(c("seurat_clusters", "orig.ident", "nCount_RNA",
+                   "nFeature_RNA", "optimal_res"))) %>%
+  get_props("sample_ID", "final_names") %>%
+  mutate(Region = as.factor(Region),
+         Region = factor(Region,
+                         levels = c("SN", "VTA", "SI", "HypoTs")),
+         Disease = as.factor(Disease),
+         Disease = factor(Disease, levels = c("NPC", "PD")),
+         Sex = as.factor(Sex),
+         Sex = factor(Sex, levels = c("M", "F")),
+         NL = as.factor(NL),
+         NL = factor(NL, levels = c("0", "1", "2", "3", "4")),
+         LB = as.factor(LB),
+         LB = factor(LB, levels = c("NONE", "LOW", "MED", "HIGH")),
+         BRAAKLB = as.factor(BRAAKLB),
+         BRAAKLB = factor(BRAAKLB, levels = c("IV", "V", "VI", "0")))
+glimpse(props)
+
+stopifnot(nrow(props) == 1644 & ncol(props) == 23)
+
+#Check if any clusters are only present in cases or controls
+props %>%
+  group_by(Region, Disease, final_names) %>% 
+  summarize(n = sum(prop > 0)) %>%
+  pivot_wider(id_cols = c("Region", "final_names"), names_from = Disease,
+              values_from = n) %>%
+  my_datatable()
+
+props %>%
+  mutate(across(all_of(c("sample_ID", "Donor", "batch", "Region", "Sex",
+                         "Disease")), as.factor),
+         across(starts_with("RNA_snn_res.0."), as.factor)) %>%
+  my_datatable()
+
+# Define cell types
+cell_types <- unique(props$final_names)
+cell_types <- structure(cell_types, names = cell_types)
+```
+
+# Visualize proportions
+```{r}
+# plot props of all cell types in PD and NPCs (all regions)
+props %>%
+   mutate(final_names = as.factor(final_names),
+          final_names = factor(final_names, levels = final_names_levels)) %>%
+  ggplot(aes(Region, sqrt(prop), color = Disease)) +
+    geom_boxplot(outlier.shape = NA, coef = 0, width = .7,
+                 position = position_dodge(width = .85)) +
+    ggbeeswarm::geom_beeswarm(dodge.width = .85, corral = "gutter", alpha = 0.3,
+                              corral.width = 0.3, method = "swarm", cex = 1,
+                              priority = "density", size = .8) +
+    scale_color_manual(values = c(NPC = "#45CAFF", PD = "#FF1B6B")) +
+    facet_wrap(~ final_names) +
+    labs(x = "Region", y = "sqrt( Relative Proportion )", color = "Diagnosis") +
+    theme_classic() +
+    theme(panel.grid = element_blank(),
+          axis.line = element_blank(),
+          legend.position = "top",
+          axis.ticks = element_blank())
+
+## props_distribution for PD and NPC
+ggplot(props,
+       aes(sqrt(prop), after_stat(scaled), group = as.factor(final_clusters),
+           color = as.factor(final_clusters))) +
+  geom_density() +
+  facet_grid(Disease ~ Region) +
+  labs(title = "Distribution of sqrt(Relative Proportion)",
+       x = "Props", y = "Density", color = "Cluster") +
+  theme_classic()
+```
+
+
+### Save proportion file
+```{r}
+write.csv(props, file = "pd_analysis_props.csv")
+```
+
+# Proportion differences across regions per diagnosis
+## NPC
+```{r}
+props_npc <- props %>%
+  filter(Disease == "NPC") %>%
+  droplevels()
+
+region_per_cell_type_npc <- purrr::map_dfr(cell_types, function(cell_type) {
+  # filtering to each cluster
+  props_npc_cell_type <- props_npc %>%
+    filter(final_names == cell_type)
+  
+  # define  model for assessing region
+  region_diff_npc <- nlme::lme(
+    sqrt(prop) ~ Region + Sex + Age + batch,
+    random = ~ 1 | Donor,
+    data = props_npc_cell_type
+  )
+  
+  # create output table with the effect of region
+  broom.mixed::tidy(region_diff_npc, effects = "fixed", conf.int = T)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method = "fdr"),
+         cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  select(cell_type, term, estimate, statistic, p.value, fdr, everything()) %>%
+  ungroup()
+
+my_datatable(region_per_cell_type_npc)
+```
+
+Findings at FDR < 0.05: No differences in microglial proportions across control regions
+
+## PD
+```{r}
+props_pd <- props %>%
+  filter(Disease == "PD") %>%
+  droplevels()
+
+region_per_cell_type_pd <- purrr::map_dfr(cell_types, function(cell_type) {
+  # filtering to each cluster
+  props_pd_cell_type <- props_pd %>%
+    filter(final_names == cell_type)
+  
+  # define model for assessing region
+  region_diff_pd <- nlme::lme(
+    sqrt(prop) ~ Region + Sex + Age + batch,
+    random = ~ 1 | Donor,
+    data = props_pd_cell_type
+  )
+  
+  # create output table with the effect of region
+  broom.mixed::tidy(region_diff_pd, effects = "fixed", conf.int = T)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method = "fdr"),
+         cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  select(cell_type, term, estimate, statistic, p.value, fdr,
+         everything()) %>%
+  ungroup()
+
+my_datatable(region_per_cell_type_pd)
+```
+
+Findings at FDR < 0.05 across PD regions: 
+• NPAS3_DLG2 is increased in SI compared to SN
+• NPAS3_DLG2 is increased in HypoTs compared to SN
+• RPS11_FLT and NAALADL2 are decreased in SI compared to SN
+
+# Proportion differences between NPC and PD per region
+## SN
+```{r}
+# filter to props SN
+props_sn <- props %>%
+  filter(Region == "SN") %>%
+  droplevels()
+
+# SN comparison: robust GLM of SN
+sn_comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ Disease + Age + Sex + batch,
+                       subset(props_sn, final_names == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = T)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+sn_comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  my_datatable()
+```
+
+Findings at FDR < 0.05:
+• CD83_BCAS2 is reduced in PD SN compared to NPC SN
+
+
+### What if we stratify by sex?
+#### Males only
+```{r fig.width = 12, fig.fullwidth = TRUE}
+# filter to props SN
+props_sn_M <- props_sn %>%
+  filter(Sex == "M") %>%
+  droplevels()
+glimpse(props_sn_M)
+
+# SN comparison: robust GLM of SN
+sn_M_comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ Disease + Age + batch,
+                       subset(props_sn_M, final_names == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = T)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+sn_M_comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  my_datatable()
+```
+
+Findings at FDR < 0.05:
+In males: 
+• Age is associated with less P2RY12_CX3CR1 homeostatic microglia
+• Disease is associated with decreased CD83_BCAS2
+
+
+#### Females only
+```{r}
+# filter to props SN
+props_sn_F <- props_sn %>%
+  filter(Sex == "F") %>%
+  droplevels()
+glimpse(props_sn_F)
+
+# SN comparison: robust GLM of SN
+sn_F_comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ Disease + Age + batch,
+                       subset(props_sn_F, final_names == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = T)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+sn_F_comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  my_datatable()
+```
+
+
+### Are there any age specific effects? Let's stratify by disease and look at age
+
+#### PD only 
+```{r}
+# filter to props SN
+props_sn_pd <- props_sn %>%
+  filter(Disease == "PD") %>%
+  droplevels()
+glimpse(props_sn_pd)
+
+# SN comparison: robust GLM of SN
+sn_pd_comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ Age + Sex + batch,
+                       subset(props_sn_pd, final_names == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = T)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+sn_pd_comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  my_datatable()
+```
+
+Findings at FDR < 0.05:
+• in PD, RPS11_FLT is associated with Female sex
+
+#### NPCs only
+```{r}
+# filter to props SN
+props_sn_npc <- props_sn %>%
+  filter(Disease == "NPC") %>%
+  droplevels()
+glimpse(props_sn_npc)
+
+# SN comparison: robust GLM of SN
+sn_npc_comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ Age + Sex + batch,
+                       subset(props_sn_npc, final_names == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = T)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+sn_npc_comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  my_datatable()
+```
+
+Findings with FDR < 0.05
+• Age is associated with reduced P2RY12_CX3CR1 in NPCs
+• BAG3_CHORDC1 is associated with F in NPCs
+
+## VTA
+```{r}
+# filter to props VTA
+props_vta <- props %>%
+  filter(Region == "VTA") %>%
+  droplevels()
+glimpse(props_vta)
+
+# vta comparison: robust GLM of SN
+cell_types <- unique(props_vta$final_names)
+cell_types <- structure(cell_types, names = cell_types)
+vta_comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ Disease + Sex + Age + batch,
+                       subset(props_vta, final_names == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = T)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+vta_comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  my_datatable()
+```
+
+Findings FDR < 0.05:
+• BAG3_CHORDC1 is increased in PD compared to NPC VTA 
+• NAALADL2, P2RY12, and RPS11_FLT are decreased in PD compared to NPC VTA
+
+
+## SI
+```{r}
+props_si <- props %>%
+  filter(Region == "SI") %>%
+  droplevels()
+glimpse(props_si)
+
+# SI comparison: robust GLM of SI
+cell_types <- unique(props_si$final_names)
+cell_types <- structure(cell_types, names = cell_types)
+si_comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ Disease + Sex + Age + batch,
+                       subset(props_si, final_names == cell_type),
+                       family = "quasibinomial")
+tidy_terms(output, exponentiate = T)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depeleted in disease?
+si_comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  my_datatable()
+```
+
+Findings at FDR < 0.05:
+No clusters are associated with disease status in SI
+
+## HypoTs
+```{r}
+props_hypots <- props %>%
+  filter(Region == "HypoTs") %>%
+  droplevels()
+glimpse(props_hypots)
+
+# HypoT comparison: robust GLM of HypoT
+cell_types <- unique(props_hypots$final_names)
+cell_types <- structure(cell_types, names = cell_types)
+hypots_comp <- purrr::map_dfr(cell_types, function(cell_type) {
+  output <- robust_glm(prop ~ Disease + Sex + Age + batch,
+                       subset(props_hypots, final_names == cell_type),
+                       family = "quasibinomial")
+  tidy_terms(output, exponentiate = T)
+}, .id = "cell_type") %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value_hc, "fdr")) %>%
+  ungroup()
+
+# how many clusters are enriched/depleted in disease?
+hypots_comp %>%
+  mutate(cell_type = as.factor(cell_type), term = as.factor(term)) %>%
+  my_datatable()
+```
+
+Findings at FDR < 0.05:
+No clusters are associated with disease status in HypoTs
+
+# Sessioninfo
+```{r}
+sessionInfo()
+```

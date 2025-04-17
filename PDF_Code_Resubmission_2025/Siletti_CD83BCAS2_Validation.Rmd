@@ -1,0 +1,361 @@
+---
+title: "Siletti Validation"
+output: html_notebook
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+editor_options:
+  chunk_output_type: console
+---
+
+Purpose: The purpose of this notebook is to:
+1) Integrate the microlgial nuclei from controls in our dataset with all microlial nuclei in the Siletti et al. (2022) dataset
+2) Identify microglia in the Siletti et al. dataset carrying the CD83_BCAS2 signature
+3) Perform proportion analysis to identify regional differences in proportions of CD83_BCAS2 throughout the non-diseased human brain. To do so, we compared proprotions in each siletti region against the proportion of CD83_BCAS2 in the substantia nigra (SN) from controls within our dataset. 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages
+```{r message = F}
+options(DT.options = list(
+  pageLength = 10, language = list(search = 'Filter:'), extensions = 'Buttons',
+  filter = 'top', buttons = 'csv', autoWidth = T, scrollX = T, scrollY = T
+  ))
+
+set.seed(0)
+library(DT)
+library(knitr)
+library(Matrix)
+library(patchwork)
+library(ggplot2)
+library(cowplot)
+library(ggpubr)
+library(Seurat)
+library(harmony)
+library(dplyr)
+select <- dplyr::select
+# source robust_glm function for proportion analysis
+source("./robust_glm.R")
+```
+
+# Load and preprocess Chatila microglia data
+```{r}
+# Load and preprocess chatila_etal microglia data
+# ------------------------------
+cat("Loading chatila_etal microglia data...\n")
+chatila_micro <- readRDS("micro_defined_taxonomy.rds")
+
+# Create a combined region-disease label
+chatila_micro$Region_disease <- paste(chatila_micro$Region, chatila_micro$Disease, sep = "_")
+chatila_micro <- AddMetaData(chatila_micro, metadata = chatila_micro$Region_disease, col.name = "Region_disease")
+
+# Subset to specific brain regions
+Idents(chatila_micro) <- "Region_disease"
+chatila_obj <- subset(chatila_micro, idents = c("SN_NPC", "VTA_NPC", "SI_NPC", "HypoTs_NPC"))
+
+# Update and clean metadata
+chatila_obj$cluster_label <- chatila_obj$final_names
+chatila_obj$donor_id <- chatila_obj$Donor
+chatila_obj$Status <- chatila_obj$Region
+chatila_obj$dataset <- "chatila_etal"
+chatila_obj$Donor <- NULL
+
+# Export metadata
+meta_chatila <- chatila_obj@meta.data[, c("sample_ID", "batch", "Region", "Region_disease", "Sex", "donor_id", "cluster_label", "Age")]
+write.csv(meta_chatila, "meta_chatila_microglia.csv", row.names = FALSE)
+
+# Remove layers if present
+chatila_obj@assays$RNA@layers$data <- NULL
+chatila_obj@assays$RNA@layers$scale.data <- NULL
+
+cat("chatila_etal object processed.\n")
+```
+
+# Load and preprocess siletti_etal microglia data
+```{r}
+cat("Loading siletti_etal microglia data...\n")
+
+siletti_counts <- readRDS("Counts_siletti_etal_micro.RDS")
+siletti_meta <- readRDS("meta_siletti_etal_micro.RDS")
+
+siletti_obj <- CreateSeuratObject(counts = siletti_counts, meta.data = siletti_meta)
+siletti_obj$Region <- siletti_obj$tissue
+siletti_obj$tissue <- NULL
+siletti_obj$dataset <- "siletti_etal"
+
+# Remove donor H18.30.001 as this donor only has nuclei from cerebral cortex
+siletti_obj <- subset(siletti_obj, subset = donor_id != "H18.30.001")
+
+cat("siletti_etal object processed.\n")
+```
+
+# Integrate datasets
+```{r}
+cat("Beginning dataset integration...\n")
+
+# Combine into list
+obj.list <- list(chatila_obj, siletti_obj)
+
+# Normalize and find variable features
+obj.list <- lapply(obj.list, function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+  return(x)
+})
+
+# Select features and anchors
+features <- SelectIntegrationFeatures(object.list = obj.list)
+anchors <- FindIntegrationAnchors(object.list = obj.list, anchor.features = features)
+
+# Integrate datasets
+integrated_microglia <- IntegrateData(anchorset = anchors, k.weight = 25)
+cat("Integration complete.\n")
+```
+
+# Dimensionality reduction and clustering
+```{r}
+integrated_microglia <- ScaleData(integrated_microglia, vars.to.regress = "nCount_RNA")
+DefaultAssay(integrated_microglia) <- "integrated"
+
+integrated_microglia <- RunPCA(integrated_microglia, npcs = 30, verbose = FALSE)
+integrated_microglia <- FindNeighbors(integrated_microglia, dims = 1:22)
+integrated_microglia <- FindClusters(integrated_microglia, resolution = c(0.2, 0.3, 0.4, 0.5))
+integrated_microglia <- RunUMAP(integrated_microglia, reduction = "pca", dims = 1:22)
+```
+
+```{r}
+Idents(integrated_microglia) <- "integrated_snn_res.0.2"
+DotPlot(integrated_microglia, features = c("CD83", "BCAS2", "DNAJB1", "SLC7A5", "CD69", "HIF1A"))
+```
+
+The integrated cluster 6 at resolution 0.2 carries the CD83_BCAS2 signature. 
+
+# Save final object
+```{r}
+saveRDS(integrated_microglia, "integrated_microglia_chatila_siletti_etal.rds")
+cat("Integrated microglia object saved.\n")
+```
+
+# Caluclate siletti proportions
+## Get props function
+```{r}
+get_props <- function(data, id, cluster, supercluster = NULL,
+                      by = NULL, add_supercluster_prop = F,
+                      add_other_cols = T) {
+  
+  if (!is.data.frame(data)) {
+    stop("Input 'data' must be a data frame.")
+  }
+  
+  if (add_supercluster_prop & is.null(supercluster)) {
+    stop("No supercluster column provided when add_supercluster_prop == TRUE.")
+  }
+  
+  # Respect existing groups when called in a dplyr pipeline
+  if (dplyr::is_grouped_df(data)) {
+    if (is.null(by)) {
+      by <- dplyr::group_vars(data)
+    }
+    data <- dplyr::ungroup(data)
+  }
+  
+  groups <- c(id, cluster)
+  if (!is.null(supercluster)) {
+    groups <- c(groups, supercluster)
+  }
+  if (!is.null(by)) {
+    groups <- c(groups, by)
+  }
+  
+  missing_cols <- setdiff(groups, colnames(data))
+  if (length(missing_cols) > 0) {
+    stop("The following columns are missing in the data: ",
+         paste(missing_cols, collapse = ", "))
+  }
+  
+  # Count cells and compute proportions
+  margins <- setdiff(groups, cluster)
+  n_cluster <- table(data[groups])
+  prop <- as.data.frame(prop.table(n_cluster, margin = margins))
+  n_cluster <- as.data.frame(n_cluster)
+  colnames(prop)[colnames(prop) == "Freq"] <- "prop"
+  colnames(n_cluster)[colnames(n_cluster) == "Freq"] <- paste0("num_", cluster)
+  props <- merge(n_cluster, prop, by = groups)
+
+  # Exclude non-existing combinations
+  props <- props[!is.nan(props$prop) & !is.nan(props$prop), ]
+  
+  if (!is.null(supercluster) & add_supercluster_prop) {
+    # Count cells per id across superclusters and compute proportions
+    if(supercluster %in% groups) {
+      groups_supercluster <- setdiff(groups, cluster)
+    } else {
+      # For consistency, ensure id and supercluster are the first two variables
+      groups_supercluster <- c(id, supercluster, setdiff(groups, c(id, cluster)))
+    }
+    margins_supercluster <- setdiff(groups_supercluster, supercluster)
+    n_supercluster <- table(data[groups_supercluster])
+    prop_supercluster <- as.data.frame(prop.table(
+      n_supercluster, margin = margins_supercluster))
+    n_supercluster <- as.data.frame(n_supercluster)
+    colnames(prop_supercluster)[colnames(prop_supercluster) == "Freq"] <- "prop"
+    props_supercluster <- merge(n_supercluster, prop_supercluster,
+                                by = groups_supercluster)
+    
+    # Exclude non-existing combinations
+    props_supercluster <- props_supercluster[
+      !is.nan(props_supercluster$prop) & !is.nan(props_supercluster$prop), ]
+    
+    # Add supercluster proportions as tho they are cluster props
+    colnames(props_supercluster)[colnames(props_supercluster) == "Freq"] <-
+      paste0("num_", cluster)
+    colnames(props_supercluster)[
+      colnames(props_supercluster) == supercluster] <- cluster
+    props_supercluster[supercluster] <- supercluster
+    props <- rbind(props, props_supercluster, make.row.names = F)
+  }
+  
+  # Convert columns to original class
+  props[[id]] <- as(props[[id]], class(data[[id]]))
+  props[[cluster]] <- as(props[[cluster]], class(data[[cluster]]))
+  if (!is.null(supercluster)) {
+    props[[supercluster]] <- as(props[[supercluster]],
+                                class(data[[supercluster]]))
+  }
+  
+  # Add other columns if required, excluding grouping columns
+  if (add_other_cols) {
+    other_columns <- setdiff(names(data), groups)
+    if (length(other_columns) > 0) {
+      df <- summarize_by_group(data, id, other_columns)
+      props <- merge(props, df, by = id)
+    }
+  }
+  
+  # *Validation Checks*
+  
+  ## Ensure no new non-zero id-cluster combinations were created
+  original_combs <- dplyr::distinct(data[groups])
+  result_combs <- props[props[paste0("num_", cluster)] > 0, groups]
+  if (!is.null(supercluster) & add_supercluster_prop) {
+    result_combs <- result_combs[result_combs[supercluster] != supercluster,
+                                 groups]
+  }
+  new_combs <- dplyr::anti_join(result_combs, original_combs,
+                                by = groups)
+
+  if (nrow(new_combs) > 0) {
+    stop("Unexpected id x cluster x by x (supercluster) combinations.")
+  }
+
+  ## Ensure proportions sum to ~1 (allow for minor floating-point errors)
+  props_sum <- props %>%
+    dplyr::group_by(!!!rlang::syms(margins)) %>%
+    dplyr::summarize(n = round(sum(prop), 5), .groups = "drop") %>%
+    dplyr::filter(n != 0) %>%
+    dplyr::pull(n) %>%
+    unique()
+
+  if (any(abs(props_sum - 1) > 0.001)) {
+    stop("Proportions do not sum to 1.")
+  }
+  
+  ## Ensure supercluster proportions sum to 1 per id
+  if (!is.null(supercluster) && add_supercluster_prop) {
+    supercluster_props_sum <- props %>%
+      dplyr::filter(!!rlang::sym(supercluster) == !!supercluster) %>%
+      dplyr::group_by(!!!rlang::syms(groups_supercluster)) %>%
+      dplyr::summarize(n = round(sum(prop), 5), .groups = "drop") %>%
+      dplyr::pull(n) %>%
+      unique()
+    
+    if (any(abs(supercluster_props_sum - 1) > 0.001)) {
+      stop("Supercluster proportions do not sum to 1.")
+    }
+  }
+  
+  ## Ensure id, cluster and supercluster levels are preserved
+  for (col in groups) {
+    if (!is.null(col) && any(!unique(data[[col]]) %in% unique(props[[col]]))) {
+      stop("Column '", col, "' lost some unique levels in the output.")
+    }
+  }
+  
+  ## Ensure all by groups are preserved
+  if (!is.null(by)) {
+    input_groups <- dplyr::distinct(data, !!!rlang::syms(by))
+    output_groups <- dplyr::distinct(props, !!!rlang::syms(by))
+
+    if (nrow(dplyr::anti_join(input_groups, output_groups, by = by)) > 0) {
+      stop("Some groups from 'by' are missing in the output.")
+    }
+  }
+  
+  return(props)
+}
+```
+
+## Caluclate proportions
+```{r}
+region_levels <- c(
+  "SN", "cerebellum", "hypothalamus", "midbrain", "myelencephalon", "pons", "thalamic complex",
+  "cerebral cortex", "cerebral nuclei", "hippocampal formation"
+)
+
+props_siletti <- meta %>%
+  group_by(donor_id) %>%
+  filter(n() > 100) %>%
+  ungroup() %>%
+  # keep only SN from Columbia dataset and remove spinal cord from Siletti
+  filter(!Region %in% c("HypoTs", "VTA", "SI", "spinal cord")) %>%
+  select(c("donor_id", "integrated_snn_res.0.2", "Region", "dataset", "Sex",
+           "sex", "Age", "age")) %>%
+  group_by(Region, dataset) %>%
+  get_props("donor_id", "integrated_snn_res.0.2") %>%
+  ungroup() %>%
+    mutate(
+    integrated_snn_res.0.2 = as.character(integrated_snn_res.0.2),
+    Sex_combined = coalesce(sex, Sex),
+    Sex_combined = case_when(
+      sex == "female" ~ "F",
+      sex == "male" ~ "M",
+      TRUE ~ Sex),
+    Age_combined = coalesce(age, Age),
+    Region = as.factor(Region),
+    Region = factor(Region, levels = region_levels)
+    )
+  )
+
+glimpse(props_siletti)
+
+# Define cell types
+cell_types <- unique(props_siletti$integrated_snn_res.0.2)
+cell_types <- structure(cell_types, names = cell_types)
+```
+
+# Proportion analysis for CD83_BCAS2 nuclei in siletti data
+```{r}
+# filter for microglia carrying the CD83_BCAS2 signature
+props_siletti6 <- props_siletti %>%
+  filter(integrated_snn_res.0.2 == "6") %>%
+  droplevels()
+
+  # define  model for assessing CD83_BCAS2 proportions in each region, with SN from our dataset as the reference
+  region_diff_siletti <- nlme::lme(
+    sqrt(prop) ~ Region + Sex_combined,
+    random = ~ 1 | donor_id,
+    data = props_siletti6
+  )
+  
+  # create output table with the effect of region
+  output <- broom.mixed::tidy(region_diff_siletti, effects = "fixed",
+                              conf.int = T)
+  write.csv(output, "nlme_siletti.csv")
+```
+
+

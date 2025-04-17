@@ -1,0 +1,149 @@
+---
+title: "Merge micro batches"
+author: "Zena Chatila (zkc2001@cumc.columbia.edu)"
+output:
+  html_document:
+    df_print: paged
+    toc: TRUE
+    number_sections: TRUE
+editor_options:
+  chunk_output_type: inline
+---
+# Description
+This notebook converges microglial nuclei from the old and new batches of samples from our PD dataset into one seurat V5 object. This combined seurat object can then be used for integration and clustering of the microglial nuclei in the dataset. 
+
+# Set up
+#### Load packages and set seed
+```{r message = F, warning = F}
+set.seed(123)
+library(sparseMatrixStats)
+library(Matrix)
+library(ggplot2)
+library(DT)
+library(magrittr)
+library(dplyr)
+library(Seurat)
+```
+
+#### General options
+```{r warning = F, message = F}
+options(dplyr.summarise.inform = F, DT.options = list(
+  pageLength = 10, language = list(search = 'Filter:'), extensions = 'Buttons',
+  filter = 'top', buttons = 'csv', autoWidth = T, scrollX = T, scrollY = T
+  ))
+```
+
+# Compile master seurat object accross old and new
+## Load data
+```{r}
+# Load microglial objects for batch one and batch two
+load("microglia_clustering_for_paper_20230316.RData")
+load("new_microglia_clustering_20240311.RData")
+
+#rename old and new microglial objects
+micro_old <- microglia_merged_obj_v4
+micro_new <- new_mic_obj_v2
+rm(microglia_merged_obj_v4, new_mic_obj_v2)
+
+stopifnot(nrow(micro_old) == nrow(micro_new))
+# How many cells per object
+sapply(c(micro_old, micro_new), ncol)
+
+# Load covariates
+clinical_data <- read.csv("PDFMetaData.csv")
+donor_data <- read.csv("donor_metadata.csv")
+neuron_counts <- read.csv("NeuronCounts.csv") #microscopic neuromelanized neuron neuron counts from the SN
+```
+
+## Merge counts and metadata into a new seurat object
+> NOTE: Micro new counts are not concatenated across samples. We need to compile them into a gene by cells_across_samples matrix.
+
+```{r}
+# Counts
+counts_old <- micro_old[["RNA"]]$counts
+counts_new <- JoinLayers(micro_new)[["RNA"]]$counts
+counts_raw <- cbind(counts_old, counts_new)
+
+# Metadata
+metadata_raw <- bind_rows(list("old" = micro_old[["sample_ID"]],
+                               "new" = micro_new[["sample_ID"]]),
+                          .id = "batch")
+
+rm(micro_old, micro_new, counts_old, counts_new)
+
+# Add covariates
+metadata_raw %<>%
+  left_join(clinical_data, by = "sample_ID") %>%
+  left_join(donor_data, by = "Donor") %>%
+  left_join(neuron_counts, by = "Donor")
+
+# Format covariates
+metadata_raw %<>%
+  mutate(Donor = paste0("donor_", Donor),
+         Region = as.factor(Region),
+         Region = factor(Region, c("SN", "VTA", "SI", "HypoTs")),
+         NL = as.character(NL),
+         NL = as.factor(paste0("NL", NL)),
+         NL = factor(NL, levels = c("NL0", "NL1", "NL2", "NL3", "NL4")),
+         LB = as.factor(LB),
+         LB = factor(LB, levels = c("NONE", "LOW", "MED", "HIGH")),
+         BRAAKLB = as.factor(BRAAKLB),
+         BRAAKLB = factor(BRAAKLB, levels = c("IV", "V", "VI", "0")),
+         Sex = case_when(grepl("M", Sex) ~ "M", grepl("F", Sex) ~ "F",
+                         TRUE ~ NA_character_),
+         Sex = as.factor(Sex),
+         Sex = relevel(Sex, "M"),
+         batch = as.factor(batch),
+         Disease = as.factor(Disease),
+         Disease = relevel(Disease, "NPC")) %>%
+  select(-all_of(c("TID", "Batch2")))
+
+stopifnot(nrow(metadata_raw) == ncol(counts_raw) & nrow(metadata_raw) == 84477)
+
+# Create seurat object
+micro <- CreateSeuratObject(counts_raw, meta.data = metadata_raw)
+rm(counts_raw, metadata_raw)
+stopifnot(ncol(micro) == 84477 & nrow(micro) == 22177)
+micro
+```
+
+# Donor info
+```{r message = F, warning = F}
+micro@meta.data %>%
+  group_by(Donor, Region, batch) %>%
+  summarize(num_cells = n(), median_nCount_RNA = median(nCount_RNA, na.rm = T),
+            median_nFeature_RNA = median(nFeature_RNA, na.rm = T),
+            across(all_of(c("Disease", "NL", "LB", "Sex", "Age")), first)) %>%
+  datatable()
+```
+
+# Expression info
+```{r}
+counts <- micro[["RNA"]]$counts
+mean_gene_expr <- rowMeans(counts)
+var_gene_expr <- sparseMatrixStats::rowVars(counts)
+gene_info <- cbind(mean_gene_expr, var_gene_expr)
+
+# Gene distribution
+ggplot(gene_info, aes(mean_gene_expr, after_stat(scaled))) +
+  geom_density() +
+  theme_classic()
+
+# Expression vs variance relationship
+ggplot(gene_info, aes(log10(1 + mean_gene_expr), sqrt(var_gene_expr))) +
+  geom_point() +
+  theme_classic()
+rm(counts, mean_gene_expr, var_gene_expr, gene_info)
+```
+
+# Save
+```{r}
+# Save if it doesn't exist
+if (!file.exists("micro_merged.rda")) saveRDS(micro, "micro_merged.rda")
+rm(micro)
+```
+
+# Sessioninfo
+```{r}
+sessionInfo()
+```
